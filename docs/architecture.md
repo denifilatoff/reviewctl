@@ -12,6 +12,8 @@ starts a coding-agent harness for eligible pull requests, and records the result
 The tool runs from the user's laptop with the user's existing Codex subscription and GitHub CLI credentials. It does
 not require a GitHub App, GitHub Actions workflow, hosted service, or API billing integration.
 
+The initial implementation is built and run from source on the current development machine.
+
 ## MVP goals
 
 - Detect new pull requests and new head revisions in configured GitHub repositories.
@@ -30,6 +32,7 @@ not require a GitHub App, GitHub Actions workflow, hosted service, or API billin
 - A harness other than Codex.
 - Safe execution of code from untrusted pull request authors.
 - A service installer for `launchd`, `systemd`, cron, or Windows services.
+- Packaged installers, self-update, uninstall, or multi-OS distribution support.
 - File or standard-input submission of pull request lists.
 - A TUI or web interface.
 - APM as a runtime dependency.
@@ -328,6 +331,7 @@ The MVP command surface is intentionally small:
 
 ```text
 reviewctl doctor
+reviewctl init --repository <owner/name> --trusted-author <login>...
 reviewctl review <PR>... [--publish] [--parallel N] [--output text|json]
 reviewctl run [--once] [--parallel N]
 reviewctl status [--output text|json]
@@ -337,6 +341,8 @@ reviewctl --version
 
 - `doctor` validates configuration, the trust list, repositories, GitHub authentication, Codex authentication, the
   selected skill, and writable local paths.
+- `init` writes a new configuration from explicit repository and trusted-author arguments. It refuses to overwrite an
+  existing file and leaves publication disabled.
 - `review` processes an explicit list synchronously.
 - `run` discovers and processes eligible pull requests.
 - `status` reports scheduler state, active jobs, recent outcomes, and actionable failures.
@@ -387,6 +393,42 @@ configuration or database.
 - Pull request verdicts remain separate from process failures.
 - Provider and harness concerns remain independent.
 
+## Test architecture
+
+Tests use three execution levels.
+
+### Unit tests
+
+Unit tests cover deterministic policy and state transitions without SQLite, filesystem access, child processes,
+network access, or real sleeps. They use table-driven cases for configuration validation, fail-closed trust and
+publication, login normalization, job identity, state transitions, retry classification, backoff with a fake clock,
+discovery decisions, pull-request URL parsing, receipt and marker validation, and output mapping.
+
+Every behavior change starts with a failing test at the lowest layer that can prove it. A regression test remains at
+that layer. Coverage is diagnostic for the MVP; there is no numeric blocking threshold.
+
+### Integration tests
+
+Integration tests use real SQLite migrations, transactions, and leases; real temporary filesystem workspaces and skill
+snapshots; and the real built `reviewctl` process, including cancellation. They replace only external `gh` and Codex
+processes with narrow scripted command doubles and replace clocks when deterministic time control is required. They do
+not use credentials or network access.
+
+`make test-unit` and `make test-integration` run the two hermetic suites. `make ci` includes both and runs on every pull
+request.
+
+### Local live end-to-end test
+
+`make test-e2e` runs one local live scenario with the user's real `gh` and Codex installations and resources from the
+user's machine. It targets a dedicated allowlisted fixture repository and pull request, publishes a real review, reads
+the review back, repeats the same attempt, and proves that the idempotency marker prevents a duplicate. The evidence
+records the repository, pull request, head SHA, published review URL, receipt, and final SQLite state.
+
+The live test does not run in GitHub Actions. After the first runnable `review --publish` vertical slice, run it at the
+end of every task that changes provider publication, harness execution, receipt validation, job identity, or retry and
+idempotency behavior. Run it once more against the final `main`. Missing credentials, harness access, or fixture setup
+is a blocker, not a pass or silent skip.
+
 ## Expected extensions
 
 The design leaves room for these additions without implementing them:
@@ -397,3 +439,5 @@ The design leaves room for these additions without implementing them:
 - Restricted credentials or a constrained provider-command proxy.
 - File or standard-input submission for lists larger than practical command lines.
 - APM-managed installation instructions or a separate `reviewctl` usage skill.
+- Packaged distribution, self-update, uninstall, and multi-OS lifecycle support when use beyond the current
+  development machine makes that work necessary.

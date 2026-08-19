@@ -14,3 +14,14 @@
 - Never commit or push directly to `main`. Create a dedicated branch for every change and merge it into `main` only
   through a pull request.
 - Open every pull request as ready for review, not as a draft.
+- Use Conventional Commits format for commit messages and pull request titles: `type: summary` or
+  `type(scope): summary`. Use `feat` for new behavior, `fix` for bugs, and the precise supporting type when
+  applicable: `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`, or `revert`.
+
+## Architecture decision follow-up
+
+- After completing an implementation issue, follow `docs/ADR/README.md` to inspect available ignored Superpowers
+  documents and the available user-agent conversation for ADR candidates. Do not commit raw artifacts or transcripts,
+  and do not reconstruct unavailable conversation content.
+- Before closing the issue, post the candidates or `ADR candidates: none` to its GitHub thread. Do not create an ADR
+  until the repository owner approves the candidate.
