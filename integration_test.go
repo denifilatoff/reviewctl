@@ -86,6 +86,107 @@ func TestCancellationKillsCodexDescendantAndRetainsQueue(t *testing.T) {
 	testInterruptedAttempt(t, 30*time.Second, true, "attempt_canceled")
 }
 
+func TestCodexDescriptorLeakIsBounded(t *testing.T) {
+	temp := t.TempDir()
+	binary := filepath.Join(temp, "reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	fakeBin := installProcessHelpers(t, temp)
+	configHome := filepath.Join(temp, "config")
+	if err := os.MkdirAll(filepath.Join(configHome, "reviewctl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "harness: codex\npublish: true\nattempt_timeout: 30s\ntrusted_authors: [\"dependabot[bot]\"]\n" +
+		"repositories:\n  - provider: github\n    repository: acme/service\n"
+	if err := os.WriteFile(filepath.Join(configHome, "reviewctl", "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ready := filepath.Join(temp, "codex-leak-ready")
+	heartbeatPath := filepath.Join(temp, "descendant-heartbeat")
+	env := append(os.Environ(),
+		"GO_WANT_REVIEWCTL_HELPER=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"XDG_CONFIG_HOME="+configHome,
+		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
+		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
+		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
+		"REVIEWCTL_FAKE_CODEX_LEAK_READY="+ready,
+		"REVIEWCTL_FAKE_DESCENDANT_SURVIVED="+heartbeatPath,
+	)
+	if queued := runCLI(t, env, binary, "--json", "review", "https://github.com/acme/service/pull/7"); queued.exitCode != 0 {
+		t.Fatalf("enqueue = %+v", queued)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "--json", "run")
+	command.Env = env
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	started := time.Now()
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForPath(t, ready)
+	waitForPath(t, heartbeatPath)
+	readyData, err := os.ReadFile(ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(strings.TrimSpace(string(readyData)), "\n")
+	if len(parts) != 2 {
+		t.Fatalf("ready data = %q", readyData)
+	}
+	groupID, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-groupID, syscall.SIGKILL) })
+	err = command.Wait()
+	if ctx.Err() != nil {
+		t.Fatalf("run exceeded the outer bound: %v", ctx.Err())
+	}
+	if time.Since(started) >= 15*time.Second {
+		t.Fatalf("run was not bounded: %s", time.Since(started))
+	}
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 || stderr.String() != "" {
+		t.Fatalf("run err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	results := result["results"].([]any)
+	if len(results) != 1 || results[0].(map[string]any)["error"].(map[string]any)["code"] != "codex_failed" {
+		t.Fatalf("run result = %#v", result)
+	}
+	if _, err := os.Stat(parts[0]); !os.IsNotExist(err) {
+		t.Fatalf("attempt workspace was not removed: %v", err)
+	}
+	store, err := OpenStore(filepath.Join(temp, "state", "reviewctl", "reviewctl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	queue, queueError := store.Snapshot(context.Background())
+	history, historyError := store.History(context.Background())
+	if queueError != nil || historyError != nil || len(queue) != 1 || len(history) != 1 ||
+		history[0].ErrorCode != "codex_failed" || len(history[0].ErrorMessage) > 512 {
+		t.Fatalf("queue=%+v queue_err=%v history=%+v history_err=%v", queue, queueError, history, historyError)
+	}
+	heartbeat, err := os.ReadFile(heartbeatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeatPath)
+	if err != nil || !bytes.Equal(heartbeat, after) {
+		t.Fatalf("Codex descendant survived WaitDelay cleanup: before=%q after=%q err=%v", heartbeat, after, err)
+	}
+}
+
 func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool, wantCode string) {
 	t.Helper()
 	temp := t.TempDir()
@@ -187,7 +288,8 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := "harness: codex\npublish: true\ntrusted_authors: [alice]\nrepositories:\n" +
-		"  - provider: github\n    repository: acme/service\n"
+		"  - provider: github\n    repository: acme/service\n" +
+		"  - provider: github\n    repository: acme/other\n"
 	configFile := filepath.Join(configHome, "reviewctl", "config.yaml")
 	if err := os.WriteFile(configFile, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
@@ -199,6 +301,7 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
 		"XDG_CACHE_HOME="+filepath.Join(temp, "cache"),
 		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
+		"REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS="+filepath.Join(temp, "github-calls"),
 	)
 	result := runCLI(t, env, binary, "--json", "doctor")
 	checks, _ := result.object["prerequisites"].([]any)
@@ -212,6 +315,10 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 		if check["prerequisite"] != want || check["ready"] != true {
 			t.Fatalf("check %d = %#v", i, check)
 		}
+	}
+	githubCalls, err := os.ReadFile(filepath.Join(temp, "github-calls"))
+	if err != nil || string(githubCalls) != "auth\nrepo:acme/service\nrepo:acme/other\n" {
+		t.Fatalf("GitHub doctor calls = %q, err = %v", githubCalls, err)
 	}
 
 	if err := os.WriteFile(configFile, []byte("not: valid\n"), 0o600); err != nil {
@@ -264,6 +371,78 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 	}
 }
 
+func TestDoctorMarksGitHubUnavailableWithoutValidConfig(t *testing.T) {
+	temp := t.TempDir()
+	binary := filepath.Join(temp, "reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	fakeBin := installProcessHelpers(t, temp)
+	for _, test := range []struct {
+		name   string
+		config string
+	}{
+		{name: "missing"},
+		{name: "invalid", config: "not: valid\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(temp, test.name)
+			configHome := filepath.Join(root, "config")
+			githubCalls := filepath.Join(root, "github-calls")
+			if test.config != "" {
+				if err := os.MkdirAll(filepath.Join(configHome, "reviewctl"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(configHome, "reviewctl", "config.yaml"), []byte(test.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := append(os.Environ(),
+				"GO_WANT_REVIEWCTL_HELPER=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"XDG_CONFIG_HOME="+configHome,
+				"XDG_STATE_HOME="+filepath.Join(root, "state"),
+				"XDG_CACHE_HOME="+filepath.Join(root, "cache"),
+				"XDG_RUNTIME_DIR="+filepath.Join(root, "runtime"),
+				"REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS="+githubCalls,
+			)
+			result := runCLI(t, env, binary, "--json", "doctor")
+			if result.exitCode != 1 || result.stderr != "" || result.object["status"] != "failed" {
+				t.Fatalf("doctor = %+v", result)
+			}
+			var configCheck, githubCheck map[string]any
+			for _, raw := range result.object["prerequisites"].([]any) {
+				check := raw.(map[string]any)
+				switch check["prerequisite"] {
+				case "config":
+					configCheck = check
+				case "github":
+					githubCheck = check
+				}
+			}
+			githubError, githubFailed := githubCheck["error"].(map[string]any)
+			if configCheck["ready"] != false || githubCheck["ready"] != false || !githubFailed ||
+				githubError["code"] != "config_unavailable" ||
+				!strings.Contains(fmt.Sprint(githubError["message"]), "configured repository access was not checked") {
+				t.Fatalf("config=%#v github=%#v", configCheck, githubCheck)
+			}
+			human := exec.Command(binary, "doctor")
+			human.Env = env
+			var stdout, stderr bytes.Buffer
+			human.Stdout, human.Stderr = &stdout, &stderr
+			if err := human.Run(); err == nil || stderr.String() != "" ||
+				!strings.Contains(stdout.String(), "github: failed (config_unavailable):") ||
+				!strings.Contains(stdout.String(), "configured repository access was not checked") {
+				t.Fatalf("human doctor err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(githubCalls); !os.IsNotExist(err) {
+				t.Fatalf("GitHub doctor commands ran without valid config: %v", err)
+			}
+		})
+	}
+}
+
 func TestLaunchdScheduledRunSmoke(t *testing.T) {
 	plutil, err := exec.LookPath("plutil")
 	if err != nil {
@@ -275,9 +454,10 @@ func TestLaunchdScheduledRunSmoke(t *testing.T) {
 		t.Fatalf("decode launchd plist: %v", err)
 	}
 	var plist struct {
-		Label            string   `json:"Label"`
-		ProgramArguments []string `json:"ProgramArguments"`
-		StartInterval    int      `json:"StartInterval"`
+		Label                string            `json:"Label"`
+		ProgramArguments     []string          `json:"ProgramArguments"`
+		EnvironmentVariables map[string]string `json:"EnvironmentVariables"`
+		StartInterval        int               `json:"StartInterval"`
 	}
 	if err := json.Unmarshal(data, &plist); err != nil {
 		t.Fatal(err)
@@ -286,6 +466,28 @@ func TestLaunchdScheduledRunSmoke(t *testing.T) {
 		len(plist.ProgramArguments) != 3 || plist.ProgramArguments[1] != "--json" ||
 		plist.ProgramArguments[2] != "run" {
 		t.Fatalf("scheduled invocation = %+v", plist)
+	}
+	wantEnvironment := map[string]string{
+		"XDG_CONFIG_HOME": "/Users/you/.config",
+		"XDG_STATE_HOME":  "/Users/you/.local/state",
+		"XDG_CACHE_HOME":  "/Users/you/.cache",
+		"XDG_RUNTIME_DIR": "/Users/you/.local/state",
+		"PATH":            "/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+	}
+	if len(plist.EnvironmentVariables) != len(wantEnvironment) {
+		t.Fatalf("launchd environment = %#v", plist.EnvironmentVariables)
+	}
+	for name, want := range wantEnvironment {
+		if got := plist.EnvironmentVariables[name]; got != want {
+			t.Fatalf("launchd %s = %q, want %q", name, got, want)
+		}
+	}
+	if plist.EnvironmentVariables["XDG_RUNTIME_DIR"] != plist.EnvironmentVariables["XDG_STATE_HOME"] ||
+		filepath.Join(plist.EnvironmentVariables["XDG_STATE_HOME"], "reviewctl", "reviewctl.db") !=
+			"/Users/you/.local/state/reviewctl/reviewctl.db" ||
+		filepath.Join(plist.EnvironmentVariables["XDG_RUNTIME_DIR"], "reviewctl", "run.lock") !=
+			"/Users/you/.local/state/reviewctl/run.lock" {
+		t.Fatalf("launchd state and lock paths diverge: %#v", plist.EnvironmentVariables)
 	}
 
 	temp := t.TempDir()
@@ -780,6 +982,7 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) == 2 && args[0] == "auth" && args[1] == "status" {
+		appendDoctorGitHubCall("auth")
 		if os.Getenv("REVIEWCTL_FAKE_DOCTOR_GITHUB_FAIL") != "" {
 			fmt.Fprintln(os.Stderr, "scripted GitHub failure")
 			os.Exit(76)
@@ -788,6 +991,7 @@ func helperGH(args []string) {
 	}
 	if len(args) == 5 && args[0] == "repo" && args[1] == "view" && args[3] == "--json" &&
 		args[4] == "nameWithOwner" {
+		appendDoctorGitHubCall("repo:" + args[2])
 		fmt.Printf("{\"nameWithOwner\":%q}\n", args[2])
 		return
 	}
@@ -896,6 +1100,21 @@ func helperGH(args []string) {
 	os.Exit(92)
 }
 
+func appendDoctorGitHubCall(call string) {
+	path := os.Getenv("REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS")
+	if path == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		os.Exit(72)
+	}
+	fmt.Fprintln(file, call)
+	if file.Close() != nil {
+		os.Exit(72)
+	}
+}
+
 func helperAPM(args []string) {
 	if os.Getenv("REVIEWCTL_FAKE_DOCTOR_APM_FAIL") != "" {
 		fmt.Fprintln(os.Stderr, "scripted APM failure")
@@ -935,6 +1154,19 @@ func helperCodex(args []string) {
 		for {
 			time.Sleep(time.Hour)
 		}
+	}
+	if ready := os.Getenv("REVIEWCTL_FAKE_CODEX_LEAK_READY"); ready != "" {
+		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")
+		descendant.Env = append(os.Environ(), "GO_WANT_REVIEWCTL_DESCENDANT=1")
+		descendant.Stdout, descendant.Stderr = os.Stdout, os.Stderr
+		if descendant.Start() != nil {
+			os.Exit(73)
+		}
+		workspace, _ := os.Getwd()
+		if os.WriteFile(ready, []byte(workspace+"\n"+strconv.Itoa(os.Getpid())), 0o600) != nil {
+			os.Exit(73)
+		}
+		return
 	}
 	receiptPath := ""
 	for i := range args {

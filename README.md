@@ -65,9 +65,27 @@ The [launchd plist example](docs/com.denifilatoff.reviewctl.plist) invokes the s
 `reviewctl --json run` cycle every five minutes. The process lock permits one `run` per machine. The plist is an
 example, not an installer.
 
-1. Build `reviewctl`, copy it to `/Users/<user>/.local/bin/reviewctl`, and run `reviewctl --json doctor`.
-2. Copy the plist to `~/Library/LaunchAgents/com.denifilatoff.reviewctl.plist`.
-3. Replace every `/Users/you` path in the copied plist with your absolute home path, then validate it:
+1. Replace `/Users/you` below with your absolute home path. Use these exact XDG values for interactive setup and all
+   later manual invocations:
+
+   ```shell
+   export XDG_CONFIG_HOME=/Users/you/.config
+   export XDG_STATE_HOME=/Users/you/.local/state
+   export XDG_CACHE_HOME=/Users/you/.cache
+   export XDG_RUNTIME_DIR=/Users/you/.local/state
+   ```
+
+   Keeping `XDG_RUNTIME_DIR` equal to `XDG_STATE_HOME` makes manual and scheduled runs use the same lock path.
+
+2. Build `reviewctl`, copy it to `/Users/you/.local/bin/reviewctl`, and initialize and check it from that shell:
+
+   ```shell
+   reviewctl --json init
+   reviewctl --json doctor
+   ```
+
+3. Copy the plist to `~/Library/LaunchAgents/com.denifilatoff.reviewctl.plist`. Replace every `/Users/you` value with
+   the same absolute paths exported above, then validate it:
 
    ```shell
    plutil -lint ~/Library/LaunchAgents/com.denifilatoff.reviewctl.plist

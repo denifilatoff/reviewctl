@@ -12,6 +12,14 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>XDG_CONFIG_HOME</key>
+    <string>/Users/you/.config</string>
+    <key>XDG_STATE_HOME</key>
+    <string>/Users/you/.local/state</string>
+    <key>XDG_CACHE_HOME</key>
+    <string>/Users/you/.cache</string>
+    <key>XDG_RUNTIME_DIR</key>
+    <string>/Users/you/.local/state</string>
     <key>PATH</key>
     <string>/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

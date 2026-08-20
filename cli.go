@@ -135,7 +135,12 @@ func Main(args []string, stdout, stderr io.Writer) int {
 func doctorCommand(stdout io.Writer, jsonMode bool) int {
 	cfg, configError := loadConfig()
 	checks := []doctorCheck{doctorResultFor("config", "config_invalid", configError)}
-	checks = append(checks, doctorResultFor("github", "github_failed", checkGitHubAccess(cfg)))
+	if configError != nil {
+		checks = append(checks, doctorResultFor("github", "config_unavailable",
+			errors.New("configuration is unavailable; configured repository access was not checked")))
+	} else {
+		checks = append(checks, doctorResultFor("github", "github_failed", checkGitHubAccess(cfg)))
+	}
 	checks = append(checks, doctorResultFor("codex", "codex_failed", checkCommand("codex", "login", "status")))
 	checks = append(checks, doctorResultFor("apm", "apm_failed", checkLockedSkills()))
 	checks = append(checks, doctorResultFor("state", "state_failed", checkState()))

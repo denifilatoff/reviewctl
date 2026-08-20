@@ -205,14 +205,21 @@ func runCommand(ctx context.Context, dir string, stdin io.Reader, name string, a
 func runCodexCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error {
-		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
+	command.Cancel = func() error { return killProcessGroup(command.Process.Pid) }
+	command.WaitDelay = time.Second
+	err := executeCommand(ctx, command, dir, stdin, name)
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return errors.Join(err, killProcessGroup(command.Process.Pid))
 	}
-	return executeCommand(ctx, command, dir, stdin, name)
+	return err
+}
+
+func killProcessGroup(pid int) error {
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
 }
 
 func executeCommand(ctx context.Context, command *exec.Cmd, dir string, stdin io.Reader, name string) error {
