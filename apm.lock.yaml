@@ -1,0 +1,16 @@
+lockfile_version: '1'
+generated_at: '2026-08-20T09:14:45.404594+00:00'
+apm_version: 0.28.0
+dependencies:
+- repo_url: netcracker/qubership-ai-packages
+  materialization_repo_url: Netcracker/qubership-ai-packages
+  name: adversarial-code-review
+  host: github.com
+  resolved_commit: f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
+  resolved_ref: f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
+  version: 1.0.0
+  virtual_path: agent-packages/adversarial-code-review
+  is_virtual: true
+  package_type: apm_package
+  content_hash: sha256:27352486db08f0f0062f80ddbf4ec7f30a0fd1fca55a6657c55c7680499a5c47
+deployments: []
