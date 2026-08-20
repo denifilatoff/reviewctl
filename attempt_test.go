@@ -51,6 +51,11 @@ func TestValidateGitHubPullRequestFailsClosed(t *testing.T) {
 		"author untrusted":     func(_ *Config, r *GitHubPullRequest) { r.Author = "mallory" },
 		"pull request closed":  func(_ *Config, r *GitHubPullRequest) { r.State = "CLOSED" },
 		"pull request draft":   func(_ *Config, r *GitHubPullRequest) { r.IsDraft = true },
+		"wrong repository":     func(_ *Config, r *GitHubPullRequest) { r.URL = "https://github.com/acme/other/pull/7" },
+		"wrong URL number":     func(_ *Config, r *GitHubPullRequest) { r.URL = "https://github.com/acme/service/pull/8" },
+		"wrong response number": func(_ *Config, r *GitHubPullRequest) {
+			r.Number = 8
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidateCfg, candidatePR := cfg, resolved
@@ -59,6 +64,21 @@ func TestValidateGitHubPullRequestFailsClosed(t *testing.T) {
 				t.Fatal("expected trust check to fail")
 			}
 		})
+	}
+}
+
+func TestValidateGitHubPullRequestAcceptsRepositoryDisplayCase(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/powershell/powershell/pull/7")
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"octocat"},
+		Repositories: []Repository{{Provider: "github", Repository: "powershell/powershell"}},
+	}
+	resolved := GitHubPullRequest{
+		URL: "https://github.com/PowerShell/PowerShell/pull/7", Number: 7, State: "OPEN", HeadSHA: "abc",
+		Author: "octocat",
+	}
+	if err := ValidateGitHubPullRequest(cfg, pr, resolved); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -91,7 +111,7 @@ func TestHashSkillsUsesRelativePathsAndContents(t *testing.T) {
 
 func TestValidateReceiptAcceptsSuccessfulReviewOutcomes(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
-	for _, verdict := range []string{"APPROVE", "REQUEST_CHANGES", "COMMENT"} {
+	for _, verdict := range []string{"APPROVE", "REQUEST_CHANGES"} {
 		receipt := Receipt{
 			Provider:    "github",
 			Repository:  "acme/service",
@@ -102,9 +122,33 @@ func TestValidateReceiptAcceptsSuccessfulReviewOutcomes(t *testing.T) {
 			ReviewID:    "123",
 			ReviewURL:   "https://github.com/acme/service/pull/7#pullrequestreview-123",
 		}
-		if err := ValidateReceipt(receipt, pr, receipt.HeadSHA, receipt.SkillDigest); err != nil {
+		if err := ValidateReceipt(receipt, pr, receipt.HeadSHA, receipt.SkillDigest, false); err != nil {
 			t.Errorf("%s: %v", verdict, err)
 		}
+	}
+}
+
+func TestValidateReceiptAcceptsCommentForSelfAuthoredPR(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	receipt := Receipt{
+		Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+		Verdict: "COMMENT", ReviewID: "123",
+		ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-123",
+	}
+	if err := ValidateReceipt(receipt, pr, "head", "digest", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateReceiptRejectsCommentForOrdinaryPR(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	receipt := Receipt{
+		Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+		Verdict: "COMMENT", ReviewID: "123",
+		ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-123",
+	}
+	if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
+		t.Fatal("expected COMMENT to be rejected for a pull request authored by another user")
 	}
 }
 
@@ -120,7 +164,7 @@ func TestValidateReceiptRejectsMismatchedScope(t *testing.T) {
 		ReviewID:    "123",
 		ReviewURL:   "https://example.com/review/123",
 	}
-	if err := ValidateReceipt(receipt, pr, "expected-head", "expected-digest"); err == nil {
+	if err := ValidateReceipt(receipt, pr, "expected-head", "expected-digest", false); err == nil {
 		t.Fatal("expected mismatched receipt to be rejected")
 	}
 }
@@ -132,8 +176,39 @@ func TestValidateReceiptBindsURLToReviewID(t *testing.T) {
 		Verdict: "APPROVE", ReviewID: "123",
 		ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-456",
 	}
-	if err := ValidateReceipt(receipt, pr, "head", "digest"); err == nil {
+	if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
 		t.Fatal("expected mismatched review ID and URL to be rejected")
+	}
+}
+
+func TestValidateReceiptAcceptsRepositoryDisplayCase(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/powershell/powershell/pull/7")
+	receipt := Receipt{
+		Provider: "github", Repository: "PowerShell/PowerShell", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+		Verdict: "APPROVE", ReviewID: "123",
+		ReviewURL: "https://github.com/PowerShell/PowerShell/pull/7#pullrequestreview-123",
+	}
+	if err := ValidateReceipt(receipt, pr, "head", "digest", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateReceiptRejectsWrongReviewIdentity(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/powershell/powershell/pull/7")
+	for name, reviewURL := range map[string]string{
+		"repository": "https://github.com/PowerShell/Other/pull/7#pullrequestreview-123",
+		"number":     "https://github.com/PowerShell/PowerShell/pull/8#pullrequestreview-123",
+		"review ID":  "https://github.com/PowerShell/PowerShell/pull/7#pullrequestreview-456",
+	} {
+		t.Run(name, func(t *testing.T) {
+			receipt := Receipt{
+				Provider: "github", Repository: "PowerShell/PowerShell", Number: 7, HeadSHA: "head",
+				SkillDigest: "digest", Verdict: "APPROVE", ReviewID: "123", ReviewURL: reviewURL,
+			}
+			if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
+				t.Fatal("expected wrong review identity to be rejected")
+			}
+		})
 	}
 }
 

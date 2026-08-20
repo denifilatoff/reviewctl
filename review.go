@@ -41,3 +41,9 @@ func ParsePullRequestURL(raw string) (PullRequest, error) {
 	}
 	return pr, nil
 }
+
+func samePullRequestIdentity(raw string, expected PullRequest) bool {
+	actual, err := ParsePullRequestURL(raw)
+	return err == nil && actual.Provider == expected.Provider && actual.Repository == expected.Repository &&
+		actual.Number == expected.Number
+}

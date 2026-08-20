@@ -253,6 +253,10 @@ it returns a short receipt containing the verdict, head SHA, review identifier, 
 `reviewctl` validates the receipt and checks the final head through `gh`. It does not implement marker lookup, review
 composition, publication, or review readback. A valid receipt for a recovered marker is a successful result.
 
+Before Codex, `reviewctl` resolves the authenticated GitHub login directly through `gh`. A `COMMENT` receipt is valid
+only when that normalized login equals the already-verified pull request author; receipt data cannot establish reviewer
+identity.
+
 The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
 running as that user or prove who authored every commit in a trusted pull request.
 

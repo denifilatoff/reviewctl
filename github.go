@@ -58,7 +58,7 @@ func ValidateGitHubPullRequest(cfg Config, expected PullRequest, resolved GitHub
 	if !trusted {
 		return fail("untrusted_author", "pull request author %s is not trusted", resolved.Author)
 	}
-	if resolved.URL != expected.URL || resolved.Number != expected.Number || resolved.HeadSHA == "" {
+	if !samePullRequestIdentity(resolved.URL, expected) || resolved.Number != expected.Number || resolved.HeadSHA == "" {
 		return fail("github_mismatch", "GitHub response does not match the queued pull request")
 	}
 	if resolved.State != "OPEN" {

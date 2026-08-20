@@ -34,7 +34,7 @@ type Receipt struct {
 	Recovered   bool   `json:"recovered"`
 }
 
-func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string) error {
+func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string, selfAuthored bool) error {
 	if receipt.Provider != expected.Provider || strings.ToLower(receipt.Repository) != expected.Repository ||
 		receipt.Number != expected.Number || receipt.HeadSHA != head || receipt.SkillDigest != digest {
 		return fmt.Errorf("receipt scope does not match the pinned attempt")
@@ -42,8 +42,12 @@ func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string)
 	if receipt.Verdict != "APPROVE" && receipt.Verdict != "REQUEST_CHANGES" && receipt.Verdict != "COMMENT" {
 		return fmt.Errorf("receipt verdict must be APPROVE, REQUEST_CHANGES, or COMMENT")
 	}
-	expectedPrefix := fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-", expected.Repository, expected.Number)
-	if receipt.ReviewID == "" || receipt.ReviewURL != expectedPrefix+receipt.ReviewID {
+	if receipt.Verdict == "COMMENT" && !selfAuthored {
+		return fmt.Errorf("COMMENT verdict requires a self-authored pull request")
+	}
+	reviewPRURL, reviewID, found := strings.Cut(receipt.ReviewURL, "#pullrequestreview-")
+	if receipt.ReviewID == "" || !found || reviewID != receipt.ReviewID ||
+		!samePullRequestIdentity(reviewPRURL, expected) {
 		return fmt.Errorf("receipt review identity is invalid")
 	}
 	return nil
@@ -96,6 +100,12 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, err)
 		return result
 	}
+	authenticatedLogin, err := resolveGitHubLogin(ctx)
+	if err != nil {
+		setAttemptError(&result, err)
+		return result
+	}
+	selfAuthored := authenticatedLogin == normalizeGitHubLogin(resolved.Author)
 
 	workspace, err := os.MkdirTemp("", "reviewctl-attempt-")
 	if err != nil {
@@ -160,7 +170,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("receipt_invalid", "%v", err))
 		return result
 	}
-	if err := ValidateReceipt(receipt, pr, resolved.HeadSHA, digest); err != nil {
+	if err := ValidateReceipt(receipt, pr, resolved.HeadSHA, digest, selfAuthored); err != nil {
 		setAttemptError(&result, fail("receipt_invalid", "%v", err))
 		return result
 	}
@@ -217,6 +227,20 @@ func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, erro
 		URL: wire.URL, Number: wire.Number, State: wire.State, IsDraft: wire.IsDraft,
 		HeadSHA: wire.HeadRefOID, Author: wire.Author.Login,
 	}, nil
+}
+
+func resolveGitHubLogin(ctx context.Context) (string, error) {
+	command := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login")
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Run(); err != nil {
+		return "", fail("github_failed", "gh failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	login := normalizeGitHubLogin(stdout.String())
+	if login == "" {
+		return "", fail("github_failed", "gh returned an empty authenticated login")
+	}
+	return login, nil
 }
 
 func trustedInstruction(pr PullRequest, head, digest, source, receipt string) string {

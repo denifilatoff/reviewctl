@@ -25,20 +25,7 @@ func TestFullProcessReviewAndRunCycle(t *testing.T) {
 		t.Fatalf("build CLI: %v\n%s", err, output)
 	}
 
-	fakeBin := filepath.Join(temp, "bin")
-	if err := os.Mkdir(fakeBin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"gh", "apm", "git", "codex"} {
-		script := fmt.Sprintf("#!/bin/sh\nREVIEWCTL_HELPER_NAME=%s exec %q -test.run=TestHelperProcess -- \"$@\"\n", name, self)
-		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	fakeBin := installProcessHelpers(t, temp)
 
 	configHome := filepath.Join(temp, "config")
 	stateHome := filepath.Join(temp, "state")
@@ -134,6 +121,60 @@ repositories:
 	}
 }
 
+func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		login     string
+		wantError string
+	}{
+		{name: "self-authored", login: "dependabot[bot]"},
+		{name: "ordinary", login: "reviewer", wantError: "receipt_invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			temp := t.TempDir()
+			fakeBin := installProcessHelpers(t, temp)
+			t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+			t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+			t.Setenv("REVIEWCTL_FAKE_LOGIN", test.login)
+			t.Setenv("REVIEWCTL_FAKE_VERDICT", "COMMENT")
+
+			pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+			cfg := Config{
+				Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+				Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
+			}
+			result := ProcessAttempt(context.Background(), cfg, pr)
+			if test.wantError == "" && (!result.Success || result.Verdict != "COMMENT") {
+				t.Fatalf("self-authored COMMENT failed: %+v", result)
+			}
+			if test.wantError != "" && (result.Success || result.ErrorCode != test.wantError) {
+				t.Fatalf("ordinary COMMENT result: %+v", result)
+			}
+		})
+	}
+}
+
+func installProcessHelpers(t *testing.T, temp string) string {
+	t.Helper()
+	fakeBin := filepath.Join(temp, "bin")
+	if err := os.Mkdir(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gh", "apm", "git", "codex"} {
+		script := fmt.Sprintf("#!/bin/sh\nREVIEWCTL_HELPER_NAME=%s exec %q -test.run=TestHelperProcess -- \"$@\"\n", name, self)
+		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return fakeBin
+}
+
 type cliResult struct {
 	exitCode int
 	stdout   string
@@ -218,6 +259,14 @@ func helperGit(args []string) {
 }
 
 func helperGH(args []string) {
+	if len(args) == 4 && args[0] == "api" && args[1] == "user" && args[2] == "--jq" && args[3] == ".login" {
+		login := os.Getenv("REVIEWCTL_FAKE_LOGIN")
+		if login == "" {
+			login = "reviewer"
+		}
+		fmt.Println(login)
+		return
+	}
 	if len(args) >= 3 && args[0] == "pr" && args[1] == "view" {
 		number := int64(7)
 		author := "dependabot[bot]"
@@ -286,9 +335,13 @@ func helperCodex(args []string) {
 	if !recovered {
 		os.WriteFile(state, []byte("123"), 0o600)
 	}
+	verdict := os.Getenv("REVIEWCTL_FAKE_VERDICT")
+	if verdict == "" {
+		verdict = "APPROVE"
+	}
 	receipt := Receipt{
 		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
-		SkillDigest: fields["Skill digest"], Verdict: "APPROVE", ReviewID: "123",
+		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
 		Recovered: recovered,
 	}
