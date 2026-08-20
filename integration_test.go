@@ -121,6 +121,130 @@ repositories:
 	}
 }
 
+func TestFullProcessDiscoveryCycles(t *testing.T) {
+	temp := t.TempDir()
+	binary := filepath.Join(temp, "reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	fakeBin := installProcessHelpers(t, temp)
+	configHome := filepath.Join(temp, "config")
+	if err := os.MkdirAll(filepath.Join(configHome, "reviewctl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `harness: codex
+publish: false
+trusted_authors: ["dependabot[bot]"]
+repositories:
+  - provider: github
+    repository: acme/service
+  - provider: github
+    repository: acme/other
+`
+	if err := os.WriteFile(filepath.Join(configHome, "reviewctl", "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(temp, "gh-list-calls")
+	env := append(os.Environ(),
+		"GO_WANT_REVIEWCTL_HELPER=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"XDG_CONFIG_HOME="+configHome,
+		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
+		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
+		"REVIEWCTL_FAKE_DISCOVERY_DIR="+discoveryDir,
+		"REVIEWCTL_FAKE_GH_CALLS="+calls,
+	)
+
+	writeDiscoveryFixture(t, discoveryDir, "acme/service", `[
+		{"url":"https://github.com/acme/service/pull/7","number":7,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/8","number":8,"state":"OPEN","isDraft":true,"headRefOid":"a"}
+	]`)
+	writeDiscoveryFixture(t, discoveryDir, "acme/other", `[
+		{"url":"https://github.com/acme/other/pull/20","number":20,"state":"OPEN","isDraft":false,"headRefOid":"a"}
+	]`)
+	result := runCLI(t, env, binary, "--json", "run")
+	assertRunCounts(t, result, 0, map[string]float64{
+		"repositories": 2, "discovery_succeeded": 2, "discovery_failed": 0, "discovered": 3,
+		"enqueued": 0, "queued": 0, "attempted": 0, "succeeded": 0, "failed": 0,
+	})
+	callData, err := os.ReadFile(calls)
+	if err != nil || string(callData) != "acme/service\nacme/other\n" {
+		t.Fatalf("gh list calls = %q, err = %v", callData, err)
+	}
+
+	writeDiscoveryFixture(t, discoveryDir, "acme/service", `[
+		{"url":"https://github.com/acme/service/pull/10","number":10,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/9","number":9,"state":"OPEN","isDraft":true,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/8","number":8,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/7","number":7,"state":"OPEN","isDraft":false,"headRefOid":"a"}
+	]`)
+	result = runCLI(t, env, binary, "--json", "run")
+	assertRunCounts(t, result, 1, map[string]float64{
+		"repositories": 2, "discovery_succeeded": 2, "discovery_failed": 0, "discovered": 5,
+		"enqueued": 2, "queued": 2, "attempted": 2, "succeeded": 0, "failed": 2,
+	})
+	attempts := result.object["results"].([]any)
+	if attempts[0].(map[string]any)["number"] != float64(8) || attempts[1].(map[string]any)["number"] != float64(10) {
+		t.Fatalf("attempt order = %#v, want pull requests 8 then 10", attempts)
+	}
+
+	writeDiscoveryFixture(t, discoveryDir, "acme/service", `[
+		{"url":"https://github.com/acme/service/pull/7","number":7,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/8","number":8,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/9","number":9,"state":"OPEN","isDraft":true,"headRefOid":"b"},
+		{"url":"https://github.com/acme/service/pull/10","number":10,"state":"OPEN","isDraft":false,"headRefOid":"a"}
+	]`)
+	result = runCLI(t, env, binary, "--json", "run")
+	assertRunCounts(t, result, 1, map[string]float64{
+		"repositories": 2, "discovery_succeeded": 2, "discovery_failed": 0, "discovered": 5,
+		"enqueued": 0, "queued": 2, "attempted": 2, "succeeded": 0, "failed": 2,
+	})
+
+	writeDiscoveryFixture(t, discoveryDir, "acme/service", `[
+		{"url":"https://github.com/acme/service/pull/7","number":7,"state":"OPEN","isDraft":false,"headRefOid":"b"},
+		{"url":"https://github.com/acme/service/pull/8","number":8,"state":"OPEN","isDraft":false,"headRefOid":"a"},
+		{"url":"https://github.com/acme/service/pull/9","number":9,"state":"OPEN","isDraft":true,"headRefOid":"b"},
+		{"url":"https://github.com/acme/service/pull/10","number":10,"state":"OPEN","isDraft":false,"headRefOid":"a"}
+	]`)
+	failingEnv := append(append([]string{}, env...), "REVIEWCTL_FAKE_DISCOVERY_FAIL=acme/other")
+	result = runCLI(t, failingEnv, binary, "--json", "run")
+	assertRunCounts(t, result, 1, map[string]float64{
+		"repositories": 2, "discovery_succeeded": 1, "discovery_failed": 1, "discovered": 4,
+		"enqueued": 1, "queued": 3, "attempted": 3, "succeeded": 0, "failed": 3,
+	})
+	discovery, ok := result.object["discovery"].([]any)
+	if !ok || len(discovery) != 2 || discovery[0].(map[string]any)["repository"] != "acme/service" ||
+		discovery[1].(map[string]any)["repository"] != "acme/other" ||
+		discovery[1].(map[string]any)["status"] != "failed" {
+		t.Fatalf("discovery outcomes = %#v", result.object["discovery"])
+	}
+}
+
+func assertRunCounts(t *testing.T, result cliResult, wantExit int, wants map[string]float64) {
+	t.Helper()
+	if result.exitCode != wantExit || result.stderr != "" {
+		t.Fatalf("run result: %+v", result)
+	}
+	for field, want := range wants {
+		if got := result.object[field]; got != want {
+			t.Fatalf("%s = %#v, want %v; result=%+v", field, got, want, result)
+		}
+	}
+}
+
+func writeDiscoveryFixture(t *testing.T, dir, repository, body string) {
+	t.Helper()
+	name := strings.ReplaceAll(repository, "/", "__") + ".json"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -259,6 +383,34 @@ func helperGit(args []string) {
 }
 
 func helperGH(args []string) {
+	if len(args) == 10 && args[0] == "pr" && args[1] == "list" && args[2] == "--repo" &&
+		args[4] == "--state" && args[5] == "open" && args[6] == "--limit" && args[7] == "1000" &&
+		args[8] == "--json" && args[9] == "url,number,state,isDraft,headRefOid" {
+		repository := args[3]
+		if calls := os.Getenv("REVIEWCTL_FAKE_GH_CALLS"); calls != "" {
+			file, err := os.OpenFile(calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				os.Exit(89)
+			}
+			fmt.Fprintln(file, repository)
+			file.Close()
+		}
+		if repository == os.Getenv("REVIEWCTL_FAKE_DISCOVERY_FAIL") {
+			fmt.Fprintln(os.Stderr, "scripted discovery failure")
+			os.Exit(88)
+		}
+		dir := os.Getenv("REVIEWCTL_FAKE_DISCOVERY_DIR")
+		if dir == "" {
+			fmt.Println("[]")
+			return
+		}
+		data, err := os.ReadFile(filepath.Join(dir, strings.ReplaceAll(repository, "/", "__")+".json"))
+		if err != nil {
+			os.Exit(87)
+		}
+		os.Stdout.Write(data)
+		return
+	}
 	if len(args) == 4 && args[0] == "api" && args[1] == "user" && args[2] == "--jq" && args[3] == ".login" {
 		login := os.Getenv("REVIEWCTL_FAKE_LOGIN")
 		if login == "" {
@@ -268,6 +420,36 @@ func helperGH(args []string) {
 		return
 	}
 	if len(args) >= 3 && args[0] == "pr" && args[1] == "view" {
+		if dir := os.Getenv("REVIEWCTL_FAKE_DISCOVERY_DIR"); dir != "" {
+			pr, err := ParsePullRequestURL(args[2])
+			if err != nil {
+				os.Exit(86)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, strings.ReplaceAll(pr.Repository, "/", "__")+".json"))
+			if err != nil {
+				os.Exit(86)
+			}
+			var snapshot []struct {
+				URL        string `json:"url"`
+				Number     int64  `json:"number"`
+				State      string `json:"state"`
+				IsDraft    bool   `json:"isDraft"`
+				HeadRefOID string `json:"headRefOid"`
+			}
+			if json.Unmarshal(data, &snapshot) != nil {
+				os.Exit(86)
+			}
+			for _, item := range snapshot {
+				if item.Number == pr.Number {
+					json.NewEncoder(os.Stdout).Encode(map[string]any{
+						"url": item.URL, "number": item.Number, "state": item.State, "isDraft": item.IsDraft,
+						"headRefOid": item.HeadRefOID, "author": map[string]string{"login": "dependabot[bot]"},
+					})
+					return
+				}
+			}
+			os.Exit(86)
+		}
 		number := int64(7)
 		author := "dependabot[bot]"
 		head := "0123456789abcdef0123456789abcdef01234567"

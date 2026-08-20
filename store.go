@@ -66,6 +66,19 @@ func OpenStore(path string) (*Store, error) {
 			error_code TEXT NOT NULL,
 			error_message TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS repository_baselines (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			PRIMARY KEY(provider, repository)
+		)`,
+		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			change_number INTEGER NOT NULL,
+			is_draft INTEGER NOT NULL,
+			head_sha TEXT NOT NULL,
+			PRIMARY KEY(provider, repository, change_number)
+		)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			db.Close()
@@ -73,6 +86,98 @@ func OpenStore(path string) (*Store, error) {
 		}
 	}
 	return &Store{db: db}, nil
+}
+
+func (s *Store) ApplyDiscoverySnapshot(
+	ctx context.Context, repository Repository, snapshot []pullRequestSnapshot,
+) (int, error) {
+	seen := make(map[int64]bool, len(snapshot))
+	for _, current := range snapshot {
+		if current.Provider != repository.Provider || current.Repository != repository.Repository ||
+			current.Number < 1 || current.HeadSHA == "" || !samePullRequestIdentity(current.URL, current.PullRequest) ||
+			seen[current.Number] {
+			return 0, fmt.Errorf("invalid discovery snapshot for %s", repository.Repository)
+		}
+		seen[current.Number] = true
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("start discovery transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var initialized bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM repository_baselines WHERE provider = ? AND repository = ?)`,
+		repository.Provider, repository.Repository).Scan(&initialized); err != nil {
+		return 0, fmt.Errorf("read repository baseline: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT change_number, is_draft, head_sha FROM pull_request_baselines
+		WHERE provider = ? AND repository = ?`, repository.Provider, repository.Repository)
+	if err != nil {
+		return 0, fmt.Errorf("read pull request baseline: %w", err)
+	}
+	previous := make(map[int64]pullRequestSnapshot)
+	for rows.Next() {
+		var item pullRequestSnapshot
+		item.Provider, item.Repository = repository.Provider, repository.Repository
+		if err := rows.Scan(&item.Number, &item.IsDraft, &item.HeadSHA); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("read pull request baseline: %w", err)
+		}
+		previous[item.Number] = item
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("read pull request baseline: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("read pull request baseline: %w", err)
+	}
+	queuedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	enqueued := 0
+	for _, current := range snapshot {
+		old, found := previous[current.Number]
+		var oldSnapshot *pullRequestSnapshot
+		if found {
+			oldSnapshot = &old
+		}
+		if !shouldEnqueueDiscovery(initialized, oldSnapshot, current) {
+			continue
+		}
+		result, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at)
+			VALUES (?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.URL, queuedAt)
+		if err != nil {
+			return 0, fmt.Errorf("enqueue discovered pull request: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("read discovery enqueue result: %w", err)
+		}
+		enqueued += int(rows)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pull_request_baselines WHERE provider = ? AND repository = ?`,
+		repository.Provider, repository.Repository); err != nil {
+		return 0, fmt.Errorf("replace pull request baseline: %w", err)
+	}
+	for _, current := range snapshot {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO pull_request_baselines(provider, repository, change_number, is_draft, head_sha)
+			VALUES (?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.IsDraft,
+			current.HeadSHA); err != nil {
+			return 0, fmt.Errorf("write pull request baseline: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO repository_baselines(provider, repository) VALUES (?, ?)`,
+		repository.Provider, repository.Repository); err != nil {
+		return 0, fmt.Errorf("write repository baseline: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit discovery transaction: %w", err)
+	}
+	return enqueued, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

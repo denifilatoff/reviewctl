@@ -14,6 +14,7 @@ import (
 
 func TestMainHumanRunPrintsSummary(t *testing.T) {
 	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
 	configHome := filepath.Join(temp, "config")
 	configDir := filepath.Join(configHome, "reviewctl")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
@@ -26,13 +27,15 @@ func TestMainHumanRunPrintsSummary(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	var stdout, stderr bytes.Buffer
 	exitCode := Main([]string{"run"}, &stdout, &stderr)
 	if exitCode != 0 || stderr.String() != "" {
 		t.Fatalf("run failed: exit=%d stderr=%q", exitCode, stderr.String())
 	}
-	want := "run: queued=0 attempted=0 succeeded=0 failed=0\n"
+	want := "run: repositories=1 discovery_failed=0 discovered=0 enqueued=0 queued=0 attempted=0 succeeded=0 failed=0\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}

@@ -1,7 +1,7 @@
 # reviewctl
 
-`reviewctl` queues GitHub pull requests on one trusted laptop and asks Codex to publish reviews. The first working slice
-accepts explicit pull request URLs. It does not discover changes automatically.
+`reviewctl` queues GitHub pull requests on one trusted laptop and asks Codex to publish reviews. It discovers review
+events in configured repositories and also accepts explicit pull request URLs.
 
 Build the command and run the CI gates from the repository root:
 
@@ -36,7 +36,7 @@ Queue one pull request without invoking Codex:
 reviewctl --json review https://github.com/owner/repository/pull/123
 ```
 
-Process the queue snapshot once, sequentially, and exit:
+Discover changes, process the resulting queue snapshot once, sequentially, and exit:
 
 ```shell
 reviewctl --json run

@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -31,6 +36,57 @@ type GitHubPullRequest struct {
 	IsDraft bool
 	HeadSHA string
 	Author  string
+}
+
+type pullRequestSnapshot struct {
+	PullRequest
+	IsDraft bool
+	HeadSHA string
+}
+
+func shouldEnqueueDiscovery(initialized bool, previous *pullRequestSnapshot, current pullRequestSnapshot) bool {
+	if !initialized || current.IsDraft {
+		return false
+	}
+	return previous == nil || previous.IsDraft || previous.HeadSHA != current.HeadSHA
+}
+
+func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullRequestSnapshot, error) {
+	// ponytail: The 1,000-PR limit avoids custom pagination; use gh api --paginate if a repository can exceed it.
+	command := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repository.Repository, "--state", "open",
+		"--limit", "1000", "--json", "url,number,state,isDraft,headRefOid")
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Run(); err != nil {
+		return nil, fail("github_failed", "gh failed for %s: %v: %s", repository.Repository, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	var response []struct {
+		URL        string `json:"url"`
+		Number     int64  `json:"number"`
+		State      string `json:"state"`
+		IsDraft    bool   `json:"isDraft"`
+		HeadRefOID string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return nil, fail("github_failed", "decode gh response for %s: %v", repository.Repository, err)
+	}
+	snapshot := make([]pullRequestSnapshot, len(response))
+	seen := make(map[int64]bool, len(response))
+	for i, item := range response {
+		pr := PullRequest{
+			Provider: repository.Provider, Repository: repository.Repository, Number: item.Number,
+			URL: fmt.Sprintf("https://github.com/%s/pull/%d", repository.Repository, item.Number),
+		}
+		if item.Number < 1 || item.State != "OPEN" || item.HeadRefOID == "" ||
+			!samePullRequestIdentity(item.URL, pr) || seen[item.Number] {
+			return nil, fail("github_failed", "gh returned an invalid open pull request for %s", repository.Repository)
+		}
+		seen[item.Number] = true
+		snapshot[i] = pullRequestSnapshot{PullRequest: pr, IsDraft: item.IsDraft, HeadSHA: item.HeadRefOID}
+	}
+	sort.Slice(snapshot, func(i, j int) bool { return snapshot[i].Number < snapshot[j].Number })
+	return snapshot, nil
 }
 
 func ValidateGitHubPullRequest(cfg Config, expected PullRequest, resolved GitHubPullRequest) error {

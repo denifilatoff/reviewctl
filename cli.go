@@ -34,6 +34,15 @@ type queueItem struct {
 	Status      string      `json:"status"`
 }
 
+type discoveryItem struct {
+	Provider   string       `json:"provider"`
+	Repository string       `json:"repository"`
+	Status     string       `json:"status"`
+	Observed   int          `json:"observed"`
+	Enqueued   int          `json:"enqueued"`
+	Error      *resultError `json:"error,omitempty"`
+}
+
 func Main(args []string, stdout, stderr io.Writer) int {
 	jsonMode := len(args) > 0 && args[0] == "--json"
 	if jsonMode {
@@ -243,20 +252,38 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 		return writeFailure(stdout, stderr, jsonMode, "run", 1, "state_failed", err.Error())
 	}
 	defer store.Close()
+	discovery := discoverRepositories(context.Background(), cfg, store)
 	queue, err := store.Snapshot(context.Background())
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "run", 1, "state_failed", err.Error())
 	}
 	result := struct {
-		Command    string    `json:"command"`
-		Status     string    `json:"status"`
-		Discovered int       `json:"discovered"`
-		Queued     int       `json:"queued"`
-		Attempted  int       `json:"attempted"`
-		Succeeded  int       `json:"succeeded"`
-		Failed     int       `json:"failed"`
-		Results    []runItem `json:"results"`
-	}{Command: "run", Status: "success", Queued: len(queue), Results: []runItem{}}
+		Command            string          `json:"command"`
+		Status             string          `json:"status"`
+		Repositories       int             `json:"repositories"`
+		DiscoverySucceeded int             `json:"discovery_succeeded"`
+		DiscoveryFailed    int             `json:"discovery_failed"`
+		Discovered         int             `json:"discovered"`
+		Enqueued           int             `json:"enqueued"`
+		Discovery          []discoveryItem `json:"discovery"`
+		Queued             int             `json:"queued"`
+		Attempted          int             `json:"attempted"`
+		Succeeded          int             `json:"succeeded"`
+		Failed             int             `json:"failed"`
+		Results            []runItem       `json:"results"`
+	}{
+		Command: "run", Status: "success", Repositories: len(cfg.Repositories), Discovery: discovery,
+		Queued: len(queue), Results: []runItem{},
+	}
+	for _, item := range discovery {
+		result.Discovered += item.Observed
+		result.Enqueued += item.Enqueued
+		if item.Status == "success" {
+			result.DiscoverySucceeded++
+		} else {
+			result.DiscoveryFailed++
+		}
+	}
 	for _, pr := range queue {
 		attempt := ProcessAttempt(context.Background(), cfg, pr)
 		if err := store.Finish(context.Background(), attempt); err != nil {
@@ -276,16 +303,51 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 		result.Attempted++
 	}
 	exitCode := 0
-	if result.Failed > 0 {
+	if result.DiscoveryFailed > 0 || result.Failed > 0 {
 		result.Status, exitCode = "failed", 1
 	}
 	if jsonMode {
 		writeResult(stdout, true, result)
 	} else {
-		fmt.Fprintf(stdout, "run: queued=%d attempted=%d succeeded=%d failed=%d\n",
-			result.Queued, result.Attempted, result.Succeeded, result.Failed)
+		fmt.Fprintf(stdout,
+			"run: repositories=%d discovery_failed=%d discovered=%d enqueued=%d queued=%d attempted=%d succeeded=%d failed=%d\n",
+			result.Repositories, result.DiscoveryFailed, result.Discovered, result.Enqueued, result.Queued,
+			result.Attempted, result.Succeeded, result.Failed)
 	}
 	return exitCode
+}
+
+func discoverRepositories(ctx context.Context, cfg Config, store *Store) []discoveryItem {
+	type fetched struct {
+		repository Repository
+		snapshot   []pullRequestSnapshot
+		err        error
+	}
+	fetchedSnapshots := make([]fetched, len(cfg.Repositories))
+	for i, repository := range cfg.Repositories {
+		snapshot, err := listGitHubPullRequests(ctx, repository)
+		fetchedSnapshots[i] = fetched{repository: repository, snapshot: snapshot, err: err}
+	}
+	results := make([]discoveryItem, len(fetchedSnapshots))
+	for i, fetched := range fetchedSnapshots {
+		item := discoveryItem{
+			Provider: fetched.repository.Provider, Repository: fetched.repository.Repository, Status: "success",
+		}
+		if fetched.err == nil {
+			item.Observed = len(fetched.snapshot)
+			item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, fetched.snapshot)
+		}
+		if fetched.err != nil {
+			item.Status = "failed"
+			code := "state_failed"
+			if coded, ok := fetched.err.(*codedError); ok {
+				code = coded.code
+			}
+			item.Error = &resultError{Code: code, Message: bounded(fetched.err.Error(), 512)}
+		}
+		results[i] = item
+	}
+	return results
 }
 
 func writeFailure(stdout, stderr io.Writer, jsonMode bool, command string, exitCode int, code, message string) int {
