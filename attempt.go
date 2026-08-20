@@ -145,7 +145,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		return result
 	}
 	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
-		"--sandbox", "workspace-write", "--approve-for-me", "--color", "never", "--cd", workspace,
+		"--approve-for-me", "--color", "never", "--cd", workspace,
 		"--skip-git-repo-check", "-o", receiptPath, "-"); err != nil {
 		setAttemptError(&result, fail("codex_failed", "%v", err))
 		return result

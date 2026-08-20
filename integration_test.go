@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1419,6 +1420,10 @@ func helperCodex(args []string) {
 		}
 		fmt.Println("Logged in")
 		return
+	}
+	if !slices.Contains(args, "--approve-for-me") || slices.Contains(args, "--sandbox") {
+		fmt.Fprintln(os.Stderr, "Codex attempt requires --approve-for-me without --sandbox")
+		os.Exit(2)
 	}
 	if ready := os.Getenv("REVIEWCTL_FAKE_CODEX_READY"); ready != "" {
 		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")
