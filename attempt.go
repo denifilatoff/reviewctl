@@ -240,13 +240,15 @@ func executeCommand(ctx context.Context, command *exec.Cmd, dir string, stdin io
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Run(); err != nil {
+		detail := strings.TrimSpace(output.String())
+		detail = detail[max(0, len(detail)-512):]
 		if errors.Is(err, exec.ErrWaitDelay) {
-			return fmt.Errorf("%s failed: %w: %s", name, err, bounded(strings.TrimSpace(output.String()), 512))
+			return fmt.Errorf("%s failed: %w: %s", name, err, detail)
 		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("%s failed: %w", name, ctx.Err())
 		}
-		return fmt.Errorf("%s failed: %w: %s", name, err, bounded(strings.TrimSpace(output.String()), 512))
+		return fmt.Errorf("%s failed: %w: %s", name, err, detail)
 	}
 	return nil
 }

@@ -429,6 +429,11 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 	if err != nil || string(codexCalls) != "login\nprobe\n" {
 		t.Fatalf("Codex doctor calls = %q, err = %v", codexCalls, err)
 	}
+	warningEnv := append(append([]string{}, env...), "REVIEWCTL_FAKE_DOCTOR_CODEX_SIGNAL=warnings")
+	warningResult := runCLI(t, warningEnv, binary, "--json", "doctor")
+	if warningResult.exitCode != 0 || warningResult.stderr != "" || warningResult.object["status"] != "success" {
+		t.Fatalf("doctor probe with warnings = %+v", warningResult)
+	}
 	for _, signal := range []string{"incompatible", "other-exit-one"} {
 		t.Run(signal, func(t *testing.T) {
 			calls := filepath.Join(temp, "codex-calls-"+signal)
@@ -1470,6 +1475,9 @@ func helperCodex(args []string) {
 			os.Exit(2)
 		}
 		switch os.Getenv("REVIEWCTL_FAKE_DOCTOR_CODEX_SIGNAL") {
+		case "warnings":
+			fmt.Fprintln(os.Stderr, strings.Repeat("benign warning\n", 50)+"No prompt provided via stdin.")
+			os.Exit(1)
 		case "incompatible":
 			fmt.Fprintln(os.Stderr, "Codex attempt arguments are incompatible")
 			os.Exit(2)
