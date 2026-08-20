@@ -124,8 +124,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT provider, repository, change_number, url FROM queue
-		WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM queue) ORDER BY id`)
+		SELECT provider, repository, change_number, url FROM queue ORDER BY id`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read queue: %w", err)
 	}

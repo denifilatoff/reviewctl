@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 const Version = "0.1.0"
@@ -92,6 +93,14 @@ func initCommand(stdout, stderr io.Writer, jsonMode bool) int {
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "init", 1, "init_failed", err.Error())
 	}
+	if !jsonMode {
+		configState := "preserved"
+		if created {
+			configState = "created"
+		}
+		fmt.Fprintf(stdout, "config: %s (%s)\nstate: %s\n", config, configState, state)
+		return 0
+	}
 	return writeResult(stdout, jsonMode, map[string]any{
 		"command": "init", "status": "success", "config_path": config, "state_path": state, "config_created": created,
 	})
@@ -125,13 +134,9 @@ func bulkReviewCommand(raw []string, stdout, stderr io.Writer, jsonMode bool) in
 		return writeFailure(stdout, stderr, jsonMode, "bulk-review", 1, "state_failed", err.Error())
 	}
 	if !jsonMode {
-		queued := 0
 		for _, result := range results {
-			if result.Status == "queued" {
-				queued++
-			}
+			fmt.Fprintf(stdout, "%s %s\n", result.Status, result.PullRequest.URL)
 		}
-		fmt.Fprintf(stdout, "bulk-review: queued=%d already_queued=%d\n", queued, len(results)-queued)
 		return 0
 	}
 	return writeResult(stdout, true, map[string]any{"command": "bulk-review", "status": "success", "results": results})
@@ -177,7 +182,38 @@ func statusCommand(limit int, stdout, stderr io.Writer, jsonMode bool) int {
 		return writeFailure(stdout, stderr, jsonMode, "status", 1, "state_failed", err.Error())
 	}
 	if !jsonMode {
-		fmt.Fprintf(stdout, "status: queued=%d history=%d\n", len(queue), len(history))
+		fmt.Fprintln(stdout, "queue:")
+		if len(queue) == 0 {
+			fmt.Fprintln(stdout, "  (empty)")
+		}
+		for _, pr := range queue {
+			fmt.Fprintf(stdout, "  %s\n", pr.URL)
+		}
+		fmt.Fprintln(stdout, "history:")
+		if len(history) == 0 {
+			fmt.Fprintln(stdout, "  (empty)")
+		}
+		for _, attempt := range history {
+			fmt.Fprintf(stdout, "  %s %s ", attempt.FinishedAt.UTC().Format(time.RFC3339Nano), attempt.URL)
+			if attempt.Success {
+				fmt.Fprint(stdout, "success")
+				if attempt.Verdict != "" {
+					fmt.Fprintf(stdout, " verdict=%s", attempt.Verdict)
+				}
+				if attempt.ReviewURL != "" {
+					fmt.Fprintf(stdout, " review=%s", attempt.ReviewURL)
+				}
+			} else {
+				fmt.Fprint(stdout, "failed")
+				if attempt.ErrorCode != "" {
+					fmt.Fprintf(stdout, " error=%s", attempt.ErrorCode)
+				}
+				if attempt.ErrorMessage != "" {
+					fmt.Fprintf(stdout, ": %s", bounded(attempt.ErrorMessage, 512))
+				}
+			}
+			fmt.Fprintln(stdout)
+		}
 		return 0
 	}
 	return writeResult(stdout, true, map[string]any{

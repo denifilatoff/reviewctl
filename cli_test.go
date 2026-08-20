@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,5 +199,95 @@ func TestMainInitCreatesPathsWithoutOverwritingConfig(t *testing.T) {
 	data, err = os.ReadFile(config)
 	if err != nil || string(data) != existing {
 		t.Fatalf("existing config changed to %q, err = %v", data, err)
+	}
+}
+
+func TestMainHumanInitShowsCreatedAndPreservedPaths(t *testing.T) {
+	temp := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(temp, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
+	config, _ := configPath()
+	state, _ := statePath()
+	for _, test := range []struct {
+		want string
+	}{
+		{want: fmt.Sprintf("config: %s (created)\nstate: %s\n", config, state)},
+		{want: fmt.Sprintf("config: %s (preserved)\nstate: %s\n", config, state)},
+	} {
+		var stdout, stderr bytes.Buffer
+		if exit := Main([]string{"init"}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
+			t.Fatalf("init exit = %d, stderr = %q", exit, stderr.String())
+		}
+		if stdout.String() != test.want {
+			t.Fatalf("init output = %q, want %q", stdout.String(), test.want)
+		}
+	}
+}
+
+func TestMainHumanBulkReviewShowsEachInputResult(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+	first := "https://github.com/acme/service/pull/1"
+	second := "https://github.com/acme/service/pull/2"
+	var stdout, stderr bytes.Buffer
+	if exit := Main([]string{"review", first}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("seed review exit = %d, stderr = %q", exit, stderr.String())
+	}
+	stdout.Reset()
+	if exit := Main([]string{"bulk-review", first, second, first}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
+		t.Fatalf("bulk-review exit = %d, stderr = %q", exit, stderr.String())
+	}
+	want := "already_queued " + first + "\nqueued " + second + "\nalready_queued " + first + "\n"
+	if stdout.String() != want {
+		t.Fatalf("bulk-review output = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestMainHumanStatusShowsEmptyAndBoundedPopulatedState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+	var stdout, stderr bytes.Buffer
+	if exit := Main([]string{"status"}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
+		t.Fatalf("empty status exit = %d, stderr = %q", exit, stderr.String())
+	}
+	if want := "queue:\n  (empty)\nhistory:\n  (empty)\n"; stdout.String() != want {
+		t.Fatalf("empty status output = %q, want %q", stdout.String(), want)
+	}
+
+	path, _ := statePath()
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := ParsePullRequestURL("https://github.com/acme/service/pull/3")
+	older, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
+	newer, _ := ParsePullRequestURL("https://github.com/acme/service/pull/2")
+	if _, err := store.Enqueue(context.Background(), queued); err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	if err := store.Finish(context.Background(), Attempt{
+		PullRequest: older, StartedAt: finished.Add(-2 * time.Second), FinishedAt: finished.Add(-time.Second),
+		Success: true, Verdict: "APPROVE", ReviewURL: older.URL + "#pullrequestreview-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finish(context.Background(), Attempt{
+		PullRequest: newer, StartedAt: finished.Add(-time.Second), FinishedAt: finished,
+		ErrorCode: "codex_failed", ErrorMessage: "codex failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	stdout.Reset()
+	if exit := Main([]string{"status", "--limit", "1"}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
+		t.Fatalf("populated status exit = %d, stderr = %q", exit, stderr.String())
+	}
+	want := "queue:\n  " + queued.URL + "\nhistory:\n  2026-08-20T12:00:00Z " + newer.URL +
+		" failed error=codex_failed: codex failed\n"
+	if stdout.String() != want {
+		t.Fatalf("populated status output = %q, want %q", stdout.String(), want)
+	}
+	if strings.Contains(stdout.String(), older.URL) {
+		t.Fatalf("status exceeded history limit: %q", stdout.String())
 	}
 }
