@@ -13,7 +13,7 @@ Use all available implementation evidence:
 
 - the delivered code, tests, and documentation;
 - relevant GitHub issues, pull requests, and review discussions;
-- ignored Superpowers specs and plans under `docs/superpowers/` or `.superpowers/`; and
+- ignored Superpowers artifacts under `docs/superpowers/` or `.superpowers/`; and
 - the available user-agent conversation that led to the implementation.
 
 Do not commit raw Superpowers documents or conversation transcripts. Do not reconstruct unavailable conversation
