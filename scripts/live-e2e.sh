@@ -59,9 +59,9 @@ export XDG_STATE_HOME="$work/state"
 
 marker_prefix="<!-- reviewctl:github:denifilatoff/reviewctl#24:$head:"
 count_markers() {
-  gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
-    --jq ".[] | select(.body != null and (.body | contains(\"$marker_prefix\"))) | .id" |
-    awk 'NF { count++ } END { print count + 0 }'
+  marker_ids=$(gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
+    --jq ".[] | select(.body != null and (.body | contains(\"$marker_prefix\"))) | .id") || return 1
+  printf '%s\n' "$marker_ids" | awk 'NF { count++ } END { print count + 0 }'
 }
 
 before_count=$(count_markers)

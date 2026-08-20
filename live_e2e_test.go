@@ -65,6 +65,23 @@ func TestLiveE2ERejectsExternalRepositoryBeforeCommands(t *testing.T) {
 	}
 }
 
+func TestLiveE2EFailsClosedWhenMarkerReadFails(t *testing.T) {
+	temp, fakeBin, markerState, calls := prepareLiveHelpers(t, "0")
+	command := exec.Command("sh", "scripts/live-e2e.sh")
+	command.Env = append(liveHelperEnv(temp, fakeBin, markerState, calls), "REVIEWCTL_LIVE_FAIL_MARKERS=1")
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("live script ignored marker read failure:\n%s", output)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "gh auth\ncodex login\ngh preflight\ngh REST author\ngh REST head\ngh markers\n"
+	if string(data) != want {
+		t.Fatalf("helper calls after marker read failure:\n%s\nwant:\n%s", data, want)
+	}
+}
+
 func TestLiveE2EReviewctlHelperRejectsUnknownSubcommand(t *testing.T) {
 	temp, fakeBin, markerState, calls := prepareLiveHelpers(t, "0")
 	command := exec.Command(filepath.Join(fakeBin, "reviewctl"), "--json", "definitely-not-run")
@@ -176,6 +193,9 @@ func helperLiveGH(args []string) {
 		fmt.Println(liveFixtureHead)
 	case sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24/reviews", "--paginate", "--jq", markerQuery):
 		appendLiveCall("gh markers")
+		if os.Getenv("REVIEWCTL_LIVE_FAIL_MARKERS") == "1" {
+			os.Exit(81)
+		}
 		for i := 0; i < readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")); i++ {
 			fmt.Println(i + 1)
 		}
