@@ -91,7 +91,7 @@ func TestHashSkillsUsesRelativePathsAndContents(t *testing.T) {
 
 func TestValidateReceiptAcceptsSuccessfulReviewOutcomes(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
-	for _, verdict := range []string{"APPROVE", "REQUEST_CHANGES"} {
+	for _, verdict := range []string{"APPROVE", "REQUEST_CHANGES", "COMMENT"} {
 		receipt := Receipt{
 			Provider:    "github",
 			Repository:  "acme/service",

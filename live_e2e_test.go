@@ -11,14 +11,24 @@ import (
 )
 
 func TestLiveE2EMarkerPublicationContract(t *testing.T) {
+	const fixtureURL = "https://github.com/denifilatoff/reviewctl/pull/24"
 	for _, test := range []struct {
 		name          string
 		mode          string
 		initialMarker string
 		wantSuccess   bool
+		prURL         string
+		repository    string
+		author        string
+		wantNoCalls   bool
 	}{
-		{name: "publishes then recovers", mode: "publish", initialMarker: "0", wantSuccess: true},
-		{name: "rejects recovery on first run", mode: "recover", initialMarker: "1", wantSuccess: false},
+		{name: "publishes then recovers", mode: "publish", initialMarker: "0", wantSuccess: true, prURL: fixtureURL},
+		{name: "rejects recovery on first run", mode: "recover", initialMarker: "1", prURL: fixtureURL},
+		{
+			name: "rejects external repository before commands", mode: "recover", initialMarker: "0",
+			prURL: "https://github.com/example/other/pull/1", repository: "example/other", author: "mallory",
+			wantNoCalls: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			temp := t.TempDir()
@@ -37,6 +47,7 @@ func TestLiveE2EMarkerPublicationContract(t *testing.T) {
 				}
 			}
 			markerState := filepath.Join(temp, "markers")
+			calls := filepath.Join(temp, "calls")
 			if err := os.WriteFile(markerState, []byte(test.initialMarker), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -47,6 +58,10 @@ func TestLiveE2EMarkerPublicationContract(t *testing.T) {
 				"REVIEWCTL_LIVE_MODE="+test.mode,
 				"REVIEWCTL_LIVE_MARKER_STATE="+markerState,
 				"REVIEWCTL_LIVE_RUN_STATE="+filepath.Join(temp, "runs"),
+				"REVIEWCTL_LIVE_CALLS="+calls,
+				"REVIEWCTL_LIVE_PR_URL="+test.prURL,
+				"REVIEWCTL_LIVE_REPOSITORY="+test.repository,
+				"REVIEWCTL_LIVE_TRUSTED_AUTHOR="+test.author,
 			)
 			output, err := command.CombinedOutput()
 			if test.wantSuccess && err != nil {
@@ -54,6 +69,11 @@ func TestLiveE2EMarkerPublicationContract(t *testing.T) {
 			}
 			if !test.wantSuccess && err == nil {
 				t.Fatalf("live script accepted first-run recovery:\n%s", output)
+			}
+			if test.wantNoCalls {
+				if _, statErr := os.Stat(calls); !os.IsNotExist(statErr) {
+					t.Fatalf("external fixture invoked a helper: %v", statErr)
+				}
 			}
 		})
 	}
@@ -72,18 +92,26 @@ func TestLiveE2EHelper(t *testing.T) {
 		}
 	}
 	args := os.Args[separator:]
-	const head = "c86d9a64c884eb688f87b8d2256bb6a629b10f9f"
+	if calls := os.Getenv("REVIEWCTL_LIVE_CALLS"); calls != "" {
+		file, err := os.OpenFile(calls, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			os.Exit(80)
+		}
+		fmt.Fprintln(file, name)
+		file.Close()
+	}
+	const head = "7df844ae3da63875d3326249a49e04b639f93e36"
 	switch name {
 	case "gh":
 		joined := strings.Join(args, " ")
 		switch {
 		case strings.HasPrefix(joined, "auth status"):
 		case strings.HasPrefix(joined, "pr view") && strings.Contains(joined, "state,isDraft,author,headRefOid"):
-			fmt.Printf("OPEN\tfalse\tapp/dependabot\t%s\n", head)
+			fmt.Printf("OPEN\tfalse\tdenifilatoff\t%s\n", head)
 		case strings.HasPrefix(joined, "pr view"):
 			fmt.Println(head)
 		case strings.Contains(joined, "--jq .user.login"):
-			fmt.Println("dependabot[bot]")
+			fmt.Println("denifilatoff")
 		case strings.Contains(joined, "--jq .head.sha"):
 			fmt.Println(head)
 		case strings.Contains(joined, "/reviews"):

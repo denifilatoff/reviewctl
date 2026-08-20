@@ -14,3 +14,6 @@
 - Never commit or push directly to `main`. Create a dedicated branch for every change and merge it into `main` only
   through a pull request.
 - Open every pull request as ready for review, not as a draft.
+- Publish live E2E reviews only to the canonical fixture PR documented in `README.md` in `denifilatoff/reviewctl`,
+  never another repository. Before Codex, recheck its identity, open non-draft state, and head; after publication,
+  verify readback and duplicate-free marker recovery.

@@ -48,6 +48,11 @@ variable is unset. `--json` writes exactly one result object to stdout. Exit cod
 
 ## Live E2E
 
-`make live-e2e` is restricted to `denifilatoff/gudwin` pull request 19 and `dependabot[bot]`. The script checks the
-open, non-draft fixture and pins its head before it lets `run` publish. A second run must recover the marker without
-creating a duplicate review. Missing credentials or an unsafe fixture fail the test.
+`make live-e2e` is restricted to the permanent
+[reviewctl pull request 24](https://github.com/denifilatoff/reviewctl/pull/24), authored by `denifilatoff`. Do not merge
+or close this TEST fixture. The script checks its identity, open non-draft state, and head before it lets `run` publish.
+It then verifies publication, readback, and recovery without a duplicate.
+
+The authenticated reviewer also authored the fixture. GitHub therefore forbids `APPROVE` and `REQUEST_CHANGES` for
+this self-review, so `COMMENT` is the expected successful verdict. Missing credentials or an unsafe fixture fail the
+test.

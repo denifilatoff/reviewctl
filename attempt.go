@@ -39,8 +39,8 @@ func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string)
 		receipt.Number != expected.Number || receipt.HeadSHA != head || receipt.SkillDigest != digest {
 		return fmt.Errorf("receipt scope does not match the pinned attempt")
 	}
-	if receipt.Verdict != "APPROVE" && receipt.Verdict != "REQUEST_CHANGES" {
-		return fmt.Errorf("receipt verdict must be APPROVE or REQUEST_CHANGES")
+	if receipt.Verdict != "APPROVE" && receipt.Verdict != "REQUEST_CHANGES" && receipt.Verdict != "COMMENT" {
+		return fmt.Errorf("receipt verdict must be APPROVE, REQUEST_CHANGES, or COMMENT")
 	}
 	expectedPrefix := fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-", expected.Repository, expected.Number)
 	if receipt.ReviewID == "" || receipt.ReviewURL != expectedPrefix+receipt.ReviewID {
@@ -234,10 +234,11 @@ Publish: true
 Idempotency marker: %s
 Receipt path: %s
 Before publishing, verify the current head and search submitted reviews for the exact marker. If it exists, read it back
-and return the existing review. Otherwise, perform the review, publish exactly one APPROVE or REQUEST_CHANGES review
-containing the marker, and read it back. Do not change source code or any other GitHub state. Write only one JSON object
-as the final response with provider, repository, number, head_sha, skill_digest, verdict, review_id, review_url, and
-recovered fields. The Codex CLI writes that final response to the receipt path.
+and return the existing review. Otherwise, perform the review and publish exactly one APPROVE or REQUEST_CHANGES review.
+If GitHub forbids a decisive review because the authenticated reviewer authored the pull request, publish COMMENT
+instead. Include the marker and read the review back. Do not change source code or any other GitHub state. Write only
+one JSON object as the final response with provider, repository, number, head_sha, skill_digest, verdict, review_id,
+review_url, and recovered fields. The Codex CLI writes that final response to the receipt path.
 `, pr.Provider, pr.Repository, pr.Number, pr.URL, head, digest, source, marker, receipt)
 }
 

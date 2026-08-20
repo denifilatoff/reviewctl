@@ -1,14 +1,14 @@
 #!/bin/sh
 set -eu
 
-pr_url=${REVIEWCTL_LIVE_PR_URL:-https://github.com/denifilatoff/gudwin/pull/19}
-repository=${REVIEWCTL_LIVE_REPOSITORY:-denifilatoff/gudwin}
-trusted_author=${REVIEWCTL_LIVE_TRUSTED_AUTHOR:-dependabot[bot]}
+pr_url=${REVIEWCTL_LIVE_PR_URL:-https://github.com/denifilatoff/reviewctl/pull/24}
+repository=${REVIEWCTL_LIVE_REPOSITORY:-denifilatoff/reviewctl}
+trusted_author=${REVIEWCTL_LIVE_TRUSTED_AUTHOR:-denifilatoff}
 binary=${REVIEWCTL_BIN:-}
 
-if [ "$pr_url" != "https://github.com/denifilatoff/gudwin/pull/19" ] || \
-    [ "$repository" != "denifilatoff/gudwin" ] || [ "$trusted_author" != "dependabot[bot]" ]; then
-  echo "live E2E is restricted to denifilatoff/gudwin PR #19 authored by dependabot[bot]" >&2
+if [ "$pr_url" != "https://github.com/denifilatoff/reviewctl/pull/24" ] || \
+    [ "$repository" != "denifilatoff/reviewctl" ] || [ "$trusted_author" != "denifilatoff" ]; then
+  echo "live E2E is restricted to denifilatoff/reviewctl PR #24 authored by denifilatoff" >&2
   exit 2
 fi
 if [ -z "$binary" ] || [ ! -x "$binary" ]; then
@@ -26,11 +26,8 @@ preflight=$(gh pr view "$pr_url" --json state,isDraft,author,headRefOid \
 IFS=$(printf '\t') read -r state draft author head <<EOF
 $preflight
 EOF
-if [ "$author" = "app/dependabot" ]; then
-  author='dependabot[bot]'
-fi
-rest_author=$(gh api repos/denifilatoff/gudwin/pulls/19 --jq .user.login)
-rest_head=$(gh api repos/denifilatoff/gudwin/pulls/19 --jq .head.sha)
+rest_author=$(gh api repos/denifilatoff/reviewctl/pulls/24 --jq .user.login)
+rest_head=$(gh api repos/denifilatoff/reviewctl/pulls/24 --jq .head.sha)
 if [ "$state" != "OPEN" ] || [ "$draft" != "false" ] || [ "$author" != "$trusted_author" ]; then
   echo "unsafe live fixture: state=$state draft=$draft author=$author" >&2
   exit 1
@@ -49,17 +46,17 @@ cat >"$work/config/reviewctl/config.yaml" <<EOF
 harness: codex
 publish: true
 trusted_authors:
-  - dependabot[bot]
+  - denifilatoff
 repositories:
   - provider: github
-    repository: denifilatoff/gudwin
+    repository: denifilatoff/reviewctl
 EOF
 export XDG_CONFIG_HOME="$work/config"
 export XDG_STATE_HOME="$work/state"
 
-marker_prefix="<!-- reviewctl:github:denifilatoff/gudwin#19:$head:"
+marker_prefix="<!-- reviewctl:github:denifilatoff/reviewctl#24:$head:"
 count_markers() {
-  gh api repos/denifilatoff/gudwin/pulls/19/reviews --paginate \
+  gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
     --jq ".[] | select(.body != null and (.body | contains(\"$marker_prefix\"))) | .id" |
     awk 'NF { count++ } END { print count + 0 }'
 }

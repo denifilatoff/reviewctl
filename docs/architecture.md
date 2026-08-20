@@ -229,7 +229,8 @@ The execution path is linear:
 8. Remove the entire workspace.
 9. Record history, then remove the queue entry only after confirmed success.
 
-`APPROVE` and `REQUEST_CHANGES` are successful review outcomes. They are not process failures.
+`APPROVE`, `REQUEST_CHANGES`, and `COMMENT` are successful review outcomes. `COMMENT` is used when GitHub forbids a
+decisive review because the authenticated reviewer authored the pull request. These outcomes are not process failures.
 
 If the head changes before or during the attempt, the attempt does not publish for the old head. The queue entry stays
 in place, and the next run resolves the new head.
@@ -384,9 +385,11 @@ Black-box CLI tests invoke the built command from a temporary directory without 
 result, verify stdout and stderr separation, exit codes, deterministic bulk ordering, bounded status output, and the
 documented idempotent no-op results.
 
-A local live end-to-end test uses the real GitHub and Codex credentials on an allowlisted pull request. It enqueues the
-pull request, runs one cycle, verifies the published review and history, enqueues it again, and verifies marker recovery
-without duplicate publication. Missing live prerequisites block this test rather than turning it into a passing skip.
+A local live end-to-end test uses the real GitHub and Codex credentials only on the
+[canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It rechecks the repository, pull request,
+author, open non-draft state, and head before Codex. It then verifies the published review and history, enqueues the
+fixture again, and verifies marker recovery without duplicate publication. Missing live prerequisites block this test
+rather than turning it into a passing skip.
 
 ## Non-goals
 
