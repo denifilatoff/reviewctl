@@ -964,6 +964,10 @@ repositories:
 		len(status.object["history"].([]any)) != 0 || status.object["run_active"] != false {
 		t.Fatalf("initial status = %+v", status)
 	}
+	unchangedStatus := runCLIIn(t, cwd, env, binary, "--json", "status", "--limit", "1")
+	if unchangedStatus.stdout != status.stdout {
+		t.Fatalf("unchanged status bytes differ:\nfirst:  %q\nsecond: %q", status.stdout, unchangedStatus.stdout)
+	}
 
 	run := runCLIIn(t, cwd, env, binary, "--json", "run")
 	if run.exitCode != 1 || run.stderr != "" || run.object["status"] != "failed" ||

@@ -399,10 +399,12 @@ documented idempotent no-op results.
 
 A local live end-to-end test uses the real GitHub and Codex credentials only on the
 [canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It rechecks the repository, pull request,
-author, open non-draft state, head, and absence of the exact marker before Codex. It establishes the discovery
-baseline, records one publication-disabled retryable failure, verifies a published `COMMENT` review and history,
-enqueues the fixture again, and verifies marker recovery without duplicate publication. Missing live prerequisites
-block this test rather than turning it into a passing skip.
+author, open non-draft state, head, and exact marker count before Codex. It accepts zero or one marker and rejects
+duplicates. Every invocation establishes the discovery baseline and records one publication-disabled retryable
+failure. With zero markers, it verifies a published `COMMENT` review; with one marker, it verifies recovery. Both modes
+enqueue the fixture again and verify another recovery without duplicate publication. Missing live prerequisites block
+this test rather than turning it into a passing skip. The first zero-marker run proves publication; later runs prove
+recovery without requiring a fixture head change.
 
 ## Non-goals
 

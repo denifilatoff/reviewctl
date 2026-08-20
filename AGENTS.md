@@ -17,3 +17,9 @@
 - Publish live E2E reviews only to the canonical fixture PR documented in `README.md` in `denifilatoff/reviewctl`,
   never another repository. Before Codex, recheck its identity, open non-draft state, and head; after publication,
   verify readback and duplicate-free marker recovery.
+
+## Architecture decisions
+
+- Before closing an implementation issue, follow `docs/ADR/README.md`: post qualifying candidates with the required
+  fields, or `ADR candidates: none`, to the issue thread for owner approval. Never create an ADR before explicit owner
+  approval.

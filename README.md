@@ -12,6 +12,7 @@ Run the repository gates, build the binary, and install it on your `PATH`:
 ```shell
 make ci
 go build -o reviewctl .
+mkdir -p "$HOME/.local/bin"
 install -m 0755 reviewctl "$HOME/.local/bin/reviewctl"
 ```
 
@@ -179,12 +180,14 @@ It is an example, not an installer.
 [reviewctl pull request 24](https://github.com/denifilatoff/reviewctl/pull/24), authored by `denifilatoff`. Do not merge
 or close this TEST fixture.
 
-The script checks the exact repository, pull request, author, open non-draft state, pinned head, and absence of the
-head-specific review marker before invoking Codex. It establishes a discovery baseline, records a safe
-`publication_disabled` failure with the queue retained, enables publication, and requires one `COMMENT` review. It
-then re-enqueues the same head and requires marker recovery without another review. Final assertions require one
+The script checks the exact repository, pull request, author, open non-draft state, pinned head, and head-specific
+review marker count before invoking Codex. It accepts zero or one marker and rejects duplicates. Every run establishes
+a discovery baseline and records a safe `publication_disabled` failure with the queue retained. It then enables
+publication. A zero-marker run requires one new `COMMENT` review; a one-marker run requires recovery of that review.
+Both modes re-enqueue the same head and require another recovery without a duplicate. Final assertions require one
 failed and two successful history rows, plus an empty queue.
 
 The authenticated reviewer also authored the fixture. GitHub forbids `APPROVE` and `REQUEST_CHANGES` for that
-self-review, so `COMMENT` is the expected successful verdict. Missing credentials, an unsafe fixture, a changed head,
-or an existing exact marker fails the test.
+self-review, so `COMMENT` is the expected successful verdict. The first zero-marker run proves publication. Later runs
+prove recovery without requiring a fixture head change. Missing credentials, an unsafe fixture, a changed head, or
+duplicate exact markers fail the test.

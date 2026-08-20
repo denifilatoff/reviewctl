@@ -65,10 +65,14 @@ count_markers() {
 }
 
 before_count=$(count_markers)
-if [ "$before_count" -ne 0 ]; then
-  echo "unsafe live fixture: exact review marker already exists for head $head" >&2
-  exit 1
-fi
+case "$before_count" in
+  0) mode=publication ;;
+  1) mode=recovery ;;
+  *)
+    echo "unsafe live fixture: expected at most one exact review marker for head $head, found $before_count" >&2
+    exit 1
+    ;;
+esac
 
 "$binary" --json run >"$work/baseline.json"
 if ! grep -q '"discovery_succeeded":1' "$work/baseline.json" ||
@@ -102,9 +106,16 @@ fi
 write_config true
 "$binary" --json run >"$work/run-1.json"
 first_count=$(count_markers)
-if [ "$first_count" -ne 1 ] || ! grep -q '"recovered":false' "$work/run-1.json" ||
-    ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
-  echo "first publishing run did not read back one COMMENT review" >&2
+if [ "$first_count" -ne 1 ] || ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
+  echo "first successful run did not read back exactly one COMMENT review" >&2
+  exit 1
+fi
+if [ "$mode" = publication ] && ! grep -q '"recovered":false' "$work/run-1.json"; then
+  echo "zero-marker run did not publish a new review" >&2
+  exit 1
+fi
+if [ "$mode" = recovery ] && ! grep -q '"recovered":true' "$work/run-1.json"; then
+  echo "existing-marker run did not recover the review" >&2
   exit 1
 fi
 if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; then
@@ -115,7 +126,8 @@ fi
 "$binary" --json review "$pr_url" >"$work/enqueue-2.json"
 "$binary" --json run >"$work/run-2.json"
 second_count=$(count_markers)
-if [ "$second_count" -ne "$first_count" ] || ! grep -q '"recovered":true' "$work/run-2.json"; then
+if [ "$second_count" -ne 1 ] || ! grep -q '"recovered":true' "$work/run-2.json" ||
+    ! grep -q '"verdict":"COMMENT"' "$work/run-2.json"; then
   echo "second run did not recover the existing marker without a duplicate" >&2
   exit 1
 fi
@@ -133,4 +145,5 @@ if [ "$history_count" -ne 3 ] || [ "$success_count" -ne 2 ] || [ "$failure_count
   echo "unexpected state after live E2E: history=$history_count success=$success_count failure=$failure_count queue=$queue_count" >&2
   exit 1
 fi
-printf 'live E2E passed: head=%s marked_reviews=%s history=%s\n' "$head" "$second_count" "$history_count"
+printf 'live E2E passed: mode=%s head=%s marked_reviews=%s history=%s\n' \
+  "$mode" "$head" "$second_count" "$history_count"
