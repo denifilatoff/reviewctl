@@ -237,8 +237,9 @@ The execution path is linear:
 8. Remove the entire workspace.
 9. Record history, then remove the queue entry only after confirmed success.
 
-`APPROVE`, `REQUEST_CHANGES`, and `COMMENT` are successful review outcomes. `COMMENT` is used when GitHub forbids a
-decisive review because the authenticated reviewer authored the pull request. These outcomes are not process failures.
+`APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
+valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
+These outcomes are not process failures.
 
 If the head changes before or during the attempt, the attempt does not publish for the old head. The queue entry stays
 in place, and the next run resolves the new head.
@@ -256,14 +257,15 @@ comments or call the GitHub Review API itself.
 
 Before publication, Codex must check the current head and the exact idempotency marker. If the marker already exists,
 Codex reads that review instead of publishing again. After publication, Codex reads the new review back. In both cases,
-it returns a short receipt containing the verdict, head SHA, review identifier, and review URL.
+it returns a short receipt containing the actual submitted or recovered review event, head SHA, review identifier, and
+review URL. A GitHub `COMMENTED` event maps to receipt verdict `COMMENT`, even when the review body recommends changes.
 
 `reviewctl` validates the receipt and checks the final head through `gh`. It does not implement marker lookup, review
 composition, publication, or review readback. A valid receipt for a recovered marker is a successful result.
 
-Before Codex, `reviewctl` resolves the authenticated GitHub login directly through `gh`. A `COMMENT` receipt is valid
-only when that normalized login equals the already-verified pull request author; receipt data cannot establish reviewer
-identity.
+Before Codex, `reviewctl` resolves the authenticated GitHub login directly through `gh`. A self-authored pull request
+requires a `COMMENT` receipt. Other pull requests require `APPROVE` or `REQUEST_CHANGES`; receipt data cannot establish
+reviewer identity.
 
 The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
 running as that user or prove who authored every commit in a trusted pull request.

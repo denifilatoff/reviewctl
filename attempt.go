@@ -49,6 +49,9 @@ func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string,
 	if receipt.Verdict != "APPROVE" && receipt.Verdict != "REQUEST_CHANGES" && receipt.Verdict != "COMMENT" {
 		return fmt.Errorf("receipt verdict must be APPROVE, REQUEST_CHANGES, or COMMENT")
 	}
+	if selfAuthored && receipt.Verdict != "COMMENT" {
+		return fmt.Errorf("self-authored pull request requires a COMMENT verdict")
+	}
 	if receipt.Verdict == "COMMENT" && !selfAuthored {
 		return fmt.Errorf("COMMENT verdict requires a self-authored pull request")
 	}
@@ -312,9 +315,11 @@ Receipt path: %s
 Before publishing, verify the current head and search submitted reviews for the exact marker. If it exists, read it back
 and return the existing review. Otherwise, perform the review and publish exactly one APPROVE or REQUEST_CHANGES review.
 If GitHub forbids a decisive review because the authenticated reviewer authored the pull request, publish COMMENT
-instead. Include the marker and read the review back. Do not change source code or any other GitHub state. Write only
-one JSON object as the final response with provider, repository, number, head_sha, skill_digest, verdict, review_id,
-review_url, and recovered fields. The Codex CLI writes that final response to the receipt path.
+instead. Include the marker and read the review back. Set verdict to the actual submitted or recovered GitHub review
+event. Map a GitHub COMMENTED event to COMMENT even if the review body recommends changes. Do not change source code or
+any other GitHub state. Write only one JSON object as the final response with provider, repository, number, head_sha,
+skill_digest, verdict, review_id, review_url, and recovered fields. The Codex CLI writes that final response to the
+receipt path.
 `, pr.Provider, pr.Repository, pr.Number, pr.URL, head, digest, source, marker, receipt)
 }
 

@@ -141,6 +141,20 @@ func TestValidateReceiptAcceptsCommentForSelfAuthoredPR(t *testing.T) {
 	}
 }
 
+func TestValidateReceiptRejectsDecisiveVerdictForSelfAuthoredPR(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	for _, verdict := range []string{"APPROVE", "REQUEST_CHANGES"} {
+		receipt := Receipt{
+			Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+			Verdict: verdict, ReviewID: "123",
+			ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-123",
+		}
+		if err := ValidateReceipt(receipt, pr, "head", "digest", true); err == nil {
+			t.Errorf("accepted %s for a self-authored pull request", verdict)
+		}
+	}
+}
+
 func TestValidateReceiptRejectsCommentForOrdinaryPR(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	receipt := Receipt{
