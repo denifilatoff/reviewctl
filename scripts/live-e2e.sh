@@ -5,6 +5,10 @@ pr_url=${REVIEWCTL_LIVE_PR_URL:-https://github.com/denifilatoff/reviewctl/pull/2
 repository=${REVIEWCTL_LIVE_REPOSITORY:-denifilatoff/reviewctl}
 trusted_author=${REVIEWCTL_LIVE_TRUSTED_AUTHOR:-denifilatoff}
 binary=${REVIEWCTL_BIN:-}
+if [ -z "${GH_CONFIG_DIR:-}" ]; then
+  GH_CONFIG_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/gh
+fi
+export GH_CONFIG_DIR
 
 if [ "$pr_url" != "https://github.com/denifilatoff/reviewctl/pull/24" ] || \
     [ "$repository" != "denifilatoff/reviewctl" ] || [ "$trusted_author" != "denifilatoff" ]; then

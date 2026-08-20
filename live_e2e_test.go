@@ -82,6 +82,21 @@ func TestLiveE2EFailsClosedWhenMarkerReadFails(t *testing.T) {
 	}
 }
 
+func TestLiveE2EPreservesGitHubConfigAcrossXDGOverride(t *testing.T) {
+	temp, fakeBin, markerState, calls := prepareLiveHelpers(t, "0")
+	callerConfig := filepath.Join(temp, "caller-config")
+	command := exec.Command("sh", "scripts/live-e2e.sh")
+	command.Env = append(liveHelperEnv(temp, fakeBin, markerState, calls),
+		"GH_CONFIG_DIR=",
+		"XDG_CONFIG_HOME="+callerConfig,
+		"REVIEWCTL_LIVE_EXPECT_GH_CONFIG_DIR="+filepath.Join(callerConfig, "gh"),
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("live script changed GitHub config: %v\n%s", err, output)
+	}
+	assertLiveCallOrder(t, calls)
+}
+
 func TestLiveE2EReviewctlHelperRejectsUnknownSubcommand(t *testing.T) {
 	temp, fakeBin, markerState, calls := prepareLiveHelpers(t, "0")
 	command := exec.Command(filepath.Join(fakeBin, "reviewctl"), "--json", "definitely-not-run")
@@ -193,6 +208,9 @@ func helperLiveGH(args []string) {
 		fmt.Println(liveFixtureHead)
 	case sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24/reviews", "--paginate", "--jq", markerQuery):
 		appendLiveCall("gh markers")
+		if want := os.Getenv("REVIEWCTL_LIVE_EXPECT_GH_CONFIG_DIR"); want != "" && os.Getenv("GH_CONFIG_DIR") != want {
+			os.Exit(85)
+		}
 		if os.Getenv("REVIEWCTL_LIVE_FAIL_MARKERS") == "1" {
 			os.Exit(81)
 		}
@@ -201,6 +219,9 @@ func helperLiveGH(args []string) {
 		}
 	case sameArgs(args, "pr", "view", liveFixtureURL, "--json", "headRefOid", "--jq", ".headRefOid"):
 		appendLiveCall("gh head readback")
+		if want := os.Getenv("REVIEWCTL_LIVE_EXPECT_GH_CONFIG_DIR"); want != "" && os.Getenv("GH_CONFIG_DIR") != want {
+			os.Exit(85)
+		}
 		fmt.Println(liveFixtureHead)
 	default:
 		os.Exit(81)
