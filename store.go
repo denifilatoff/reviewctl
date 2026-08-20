@@ -182,14 +182,6 @@ func (s *Store) ApplyDiscoverySnapshot(
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) Enqueue(ctx context.Context, pr PullRequest) (bool, error) {
-	added, err := s.EnqueueMany(ctx, []PullRequest{pr})
-	if err != nil {
-		return false, err
-	}
-	return added[0], nil
-}
-
 func (s *Store) EnqueueMany(ctx context.Context, pullRequests []PullRequest) ([]bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -309,30 +301,6 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 		return fmt.Errorf("commit attempt: %w", err)
 	}
 	return nil
-}
-
-func (s *Store) History(ctx context.Context) ([]Attempt, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT provider, repository, change_number, url, head_sha, skill_digest, started_at, finished_at,
-			success, verdict, review_id, review_url, error_code, error_message FROM history ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []Attempt
-	for rows.Next() {
-		var attempt Attempt
-		var started, finished string
-		if err := rows.Scan(&attempt.Provider, &attempt.Repository, &attempt.Number, &attempt.URL, &attempt.HeadSHA,
-			&attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
-			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage); err != nil {
-			return nil, err
-		}
-		attempt.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
-		attempt.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
-		result = append(result, attempt)
-	}
-	return result, rows.Err()
 }
 
 func bounded(value string, limit int) string {

@@ -24,14 +24,14 @@ func TestStoreEnqueueIsIdempotentAndSnapshotIsDeterministic(t *testing.T) {
 	first, _ := ParsePullRequestURL("https://github.com/acme/service/pull/2")
 	second, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
 
-	added, err := store.Enqueue(context.Background(), first)
-	if err != nil || !added {
+	added, err := store.EnqueueMany(context.Background(), []PullRequest{first})
+	if err != nil || !added[0] {
 		t.Fatalf("first enqueue: added=%v err=%v", added, err)
 	}
-	if added, err = store.Enqueue(context.Background(), first); err != nil || added {
+	if added, err = store.EnqueueMany(context.Background(), []PullRequest{first}); err != nil || added[0] {
 		t.Fatalf("duplicate enqueue: added=%v err=%v", added, err)
 	}
-	if _, err = store.Enqueue(context.Background(), second); err != nil {
+	if _, err = store.EnqueueMany(context.Background(), []PullRequest{second}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -150,14 +150,14 @@ func TestStoreSnapshotExcludesLaterInsertions(t *testing.T) {
 	store := openTestStore(t)
 	first, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
 	second, _ := ParsePullRequestURL("https://github.com/acme/service/pull/2")
-	if _, err := store.Enqueue(context.Background(), first); err != nil {
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{first}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Enqueue(context.Background(), second); err != nil {
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{second}); err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot) != 1 || snapshot[0].Number != 1 {
@@ -172,7 +172,7 @@ func TestStoreSnapshotExcludesLaterInsertions(t *testing.T) {
 func TestStoreFinishesAttemptsAtomically(t *testing.T) {
 	store := openTestStore(t)
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
-	if _, err := store.Enqueue(context.Background(), pr); err != nil {
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Date(2026, 8, 20, 9, 0, 0, 0, time.UTC)
@@ -209,8 +209,8 @@ func TestStoreFinishesAttemptsAtomically(t *testing.T) {
 	if len(queue) != 0 {
 		t.Fatalf("successful attempt retained queue entry: %+v", queue)
 	}
-	history, err := store.History(context.Background())
-	if err != nil || len(history) != 2 || history[0].Success || !history[1].Success {
+	_, history, err := store.Status(context.Background(), 2)
+	if err != nil || len(history) != 2 || !history[0].Success || history[1].Success {
 		t.Fatalf("unexpected history: %+v err=%v", history, err)
 	}
 }

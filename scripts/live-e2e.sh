@@ -42,15 +42,18 @@ work=$(mktemp -d)
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$work/config/reviewctl" "$work/state"
-cat >"$work/config/reviewctl/config.yaml" <<EOF
+write_config() {
+  cat >"$work/config/reviewctl/config.yaml" <<EOF
 harness: codex
-publish: true
+publish: $1
 trusted_authors:
   - denifilatoff
 repositories:
   - provider: github
     repository: denifilatoff/reviewctl
 EOF
+}
+write_config false
 export XDG_CONFIG_HOME="$work/config"
 export XDG_STATE_HOME="$work/state"
 
@@ -62,11 +65,46 @@ count_markers() {
 }
 
 before_count=$(count_markers)
-"$binary" --json review "$pr_url" >"$work/enqueue-1.json"
+if [ "$before_count" -ne 0 ]; then
+  echo "unsafe live fixture: exact review marker already exists for head $head" >&2
+  exit 1
+fi
+
+"$binary" --json run >"$work/baseline.json"
+if ! grep -q '"discovery_succeeded":1' "$work/baseline.json" ||
+    ! grep -q '"queued":0' "$work/baseline.json" || ! grep -q '"attempted":0' "$work/baseline.json"; then
+  echo "first run did not establish an empty discovery baseline" >&2
+  exit 1
+fi
+baseline_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" \
+  "SELECT COUNT(*) FROM repository_baselines WHERE provider = 'github' AND repository = 'denifilatoff/reviewctl';")
+if [ "$baseline_count" -ne 1 ]; then
+  echo "discovery baseline was not recorded" >&2
+  exit 1
+fi
+
+"$binary" --json review "$pr_url" >"$work/enqueue-retry.json"
+if "$binary" --json run >"$work/run-retry.json"; then
+  echo "publication-disabled retry unexpectedly succeeded" >&2
+  exit 1
+fi
+if ! grep -q '"code":"publication_disabled"' "$work/run-retry.json"; then
+  echo "safe retry did not report publication_disabled" >&2
+  exit 1
+fi
+retry_history=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM history;')
+retry_queue=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM queue;')
+if [ "$retry_history" -ne 1 ] || [ "$retry_queue" -ne 1 ]; then
+  echo "safe retry did not retain queue/history: history=$retry_history queue=$retry_queue" >&2
+  exit 1
+fi
+
+write_config true
 "$binary" --json run >"$work/run-1.json"
 first_count=$(count_markers)
-if [ "$first_count" -ne "$((before_count + 1))" ] || ! grep -q '"recovered":false' "$work/run-1.json"; then
-  echo "first run did not publish exactly one new marked review" >&2
+if [ "$first_count" -ne 1 ] || ! grep -q '"recovered":false' "$work/run-1.json" ||
+    ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
+  echo "first publishing run did not read back one COMMENT review" >&2
   exit 1
 fi
 if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; then
@@ -86,10 +124,13 @@ if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; 
   exit 1
 fi
 
-history_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM history WHERE success = 1;')
+history_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM history;')
+success_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM history WHERE success = 1;')
+failure_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM history WHERE success = 0;')
 queue_count=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM queue;')
-if [ "$history_count" -ne 2 ] || [ "$queue_count" -ne 0 ]; then
-  echo "unexpected state after live E2E: history=$history_count queue=$queue_count" >&2
+if [ "$history_count" -ne 3 ] || [ "$success_count" -ne 2 ] || [ "$failure_count" -ne 1 ] ||
+    [ "$queue_count" -ne 0 ]; then
+  echo "unexpected state after live E2E: history=$history_count success=$success_count failure=$failure_count queue=$queue_count" >&2
   exit 1
 fi
 printf 'live E2E passed: head=%s marked_reviews=%s history=%s\n' "$head" "$second_count" "$history_count"

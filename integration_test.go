@@ -187,11 +187,10 @@ func testCodexDescriptorLeak(t *testing.T, cancelDuringWait bool, wantCode strin
 		t.Fatal(err)
 	}
 	defer store.Close()
-	queue, queueError := store.Snapshot(context.Background())
-	history, historyError := store.History(context.Background())
-	if queueError != nil || historyError != nil || len(queue) != 1 || len(history) != 1 ||
+	queue, history, statusError := store.Status(context.Background(), 1)
+	if statusError != nil || len(queue) != 1 || len(history) != 1 ||
 		history[0].ErrorCode != wantCode || len(history[0].ErrorMessage) > 512 {
-		t.Fatalf("queue=%+v queue_err=%v history=%+v history_err=%v", queue, queueError, history, historyError)
+		t.Fatalf("queue=%+v history=%+v status_err=%v", queue, history, statusError)
 	}
 	heartbeat, err := os.ReadFile(heartbeatPath)
 	if err != nil {
@@ -276,8 +275,7 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 		t.Fatal(err)
 	}
 	defer store.Close()
-	queue, _ := store.Snapshot(context.Background())
-	history, _ := store.History(context.Background())
+	queue, history, _ := store.Status(context.Background(), 1)
 	if len(queue) != 1 || len(history) != 1 || history[0].ErrorCode != wantCode || len(history[0].ErrorMessage) > 512 {
 		t.Fatalf("queue=%+v history=%+v", queue, history)
 	}
@@ -639,9 +637,8 @@ repositories:
 		t.Fatal(err)
 	}
 	defer store.Close()
-	queue, _ := store.Snapshot(context.Background())
-	history, _ := store.History(context.Background())
-	if len(queue) != 1 || queue[0].Number != 8 || len(history) != 3 || history[2].ErrorCode != "untrusted_author" {
+	queue, history, _ := store.Status(context.Background(), 3)
+	if len(queue) != 1 || queue[0].Number != 8 || len(history) != 3 || history[0].ErrorCode != "untrusted_author" {
 		t.Fatalf("unexpected durable state: queue=%+v history=%+v", queue, history)
 	}
 
@@ -883,6 +880,115 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 	}
 }
 
+func TestAgentStyleBlackBoxAcceptance(t *testing.T) {
+	temp := t.TempDir()
+	binary := filepath.Join(temp, "reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	fakeBin := installProcessHelpers(t, temp)
+	configHome := filepath.Join(temp, "config")
+	if err := os.MkdirAll(filepath.Join(configHome, "reviewctl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `harness: codex
+publish: false
+trusted_authors: ["dependabot[bot]"]
+repositories:
+  - provider: github
+    repository: acme/service
+`
+	if err := os.WriteFile(filepath.Join(configHome, "reviewctl", "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDiscoveryFixture(t, discoveryDir, "acme/service", "[]")
+	cwd := filepath.Join(temp, "caller")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(),
+		"GO_WANT_REVIEWCTL_HELPER=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"XDG_CONFIG_HOME="+configHome,
+		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
+		"XDG_CACHE_HOME="+filepath.Join(temp, "cache"),
+		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
+		"REVIEWCTL_FAKE_DISCOVERY_DIR="+discoveryDir,
+	)
+
+	help := exec.Command(binary, "--help")
+	help.Dir, help.Env = cwd, env
+	helpOutput, err := help.CombinedOutput()
+	if err != nil || !bytes.Contains(helpOutput, []byte("init creates")) ||
+		!bytes.Contains(helpOutput, []byte("doctor checks")) ||
+		!bytes.Contains(helpOutput, []byte("review updates only the local queue")) ||
+		!bytes.Contains(helpOutput, []byte("run processes one queue snapshot and may publish GitHub reviews")) {
+		t.Fatalf("help err=%v output=%q", err, helpOutput)
+	}
+
+	if result := runCLIIn(t, cwd, env, binary, "--json", "init"); result.exitCode != 0 ||
+		result.object["config_created"] != false || result.stderr != "" {
+		t.Fatalf("init = %+v", result)
+	}
+	if result := runCLIIn(t, cwd, env, binary, "--json", "doctor"); result.exitCode != 0 ||
+		result.object["status"] != "success" || len(result.object["prerequisites"].([]any)) != 6 || result.stderr != "" {
+		t.Fatalf("doctor = %+v", result)
+	}
+
+	first := "https://github.com/acme/service/pull/7"
+	second := "https://github.com/acme/service/pull/8"
+	if result := runCLIIn(t, cwd, env, binary, "--json", "review", first); result.exitCode != 0 ||
+		result.object["status"] != "queued" || result.stderr != "" {
+		t.Fatalf("review = %+v", result)
+	}
+	if result := runCLIIn(t, cwd, env, binary, "--json", "review", first); result.exitCode != 0 ||
+		result.object["status"] != "already_queued" {
+		t.Fatalf("duplicate review = %+v", result)
+	}
+	bulk := runCLIIn(t, cwd, env, binary, "--json", "bulk-review", second, first)
+	bulkResults := bulk.object["results"].([]any)
+	if bulk.exitCode != 0 || bulk.stderr != "" || len(bulkResults) != 2 ||
+		bulkResults[0].(map[string]any)["status"] != "queued" ||
+		bulkResults[1].(map[string]any)["status"] != "already_queued" {
+		t.Fatalf("bulk-review = %+v", bulk)
+	}
+	status := runCLIIn(t, cwd, env, binary, "--json", "status", "--limit", "1")
+	queue := status.object["queue"].([]any)
+	if status.exitCode != 0 || status.stderr != "" || len(queue) != 2 ||
+		queue[0].(map[string]any)["number"] != float64(7) || queue[1].(map[string]any)["number"] != float64(8) ||
+		len(status.object["history"].([]any)) != 0 || status.object["run_active"] != false {
+		t.Fatalf("initial status = %+v", status)
+	}
+
+	run := runCLIIn(t, cwd, env, binary, "--json", "run")
+	if run.exitCode != 1 || run.stderr != "" || run.object["status"] != "failed" ||
+		run.object["discovery_succeeded"] != float64(1) || run.object["attempted"] != float64(2) ||
+		len(run.object["results"].([]any)) != 2 {
+		t.Fatalf("run = %+v", run)
+	}
+	status = runCLIIn(t, cwd, env, binary, "--json", "status", "--limit", "1")
+	if len(status.object["queue"].([]any)) != 2 || len(status.object["history"].([]any)) != 1 {
+		t.Fatalf("bounded retryable status = %+v", status)
+	}
+
+	invalid := runCLIIn(t, cwd, env, binary, "--json", "review", "not-a-url")
+	if invalid.exitCode != 2 || invalid.stderr != "" || invalid.object["status"] != "error" {
+		t.Fatalf("invalid JSON use = %+v", invalid)
+	}
+	human := exec.Command(binary, "review", "not-a-url")
+	human.Dir, human.Env = cwd, env
+	var stdout, stderr bytes.Buffer
+	human.Stdout, human.Stderr = &stdout, &stderr
+	if err := human.Run(); err == nil || stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid_url:") {
+		t.Fatalf("human invalid use err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
 func installProcessHelpers(t *testing.T, temp string) string {
 	t.Helper()
 	fakeBin := filepath.Join(temp, "bin")
@@ -910,8 +1016,13 @@ type cliResult struct {
 }
 
 func runCLI(t *testing.T, env []string, binary string, args ...string) cliResult {
+	return runCLIIn(t, "", env, binary, args...)
+}
+
+func runCLIIn(t *testing.T, dir string, env []string, binary string, args ...string) cliResult {
 	t.Helper()
 	command := exec.Command(binary, args...)
+	command.Dir = dir
 	command.Env = env
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr

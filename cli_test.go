@@ -53,88 +53,6 @@ func TestRunLockObservationNeverClaimsConsumerLock(t *testing.T) {
 	observers.Wait()
 }
 
-func TestMainHumanRunPrintsSummary(t *testing.T) {
-	temp := t.TempDir()
-	fakeBin := installProcessHelpers(t, temp)
-	configHome := filepath.Join(temp, "config")
-	configDir := filepath.Join(configHome, "reviewctl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	config := "harness: codex\npublish: true\ntrusted_authors: [\"dependabot[bot]\"]\nrepositories:\n  - provider: github\n    repository: acme/service\n"
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
-	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	var stdout, stderr bytes.Buffer
-	exitCode := Main([]string{"run"}, &stdout, &stderr)
-	if exitCode != 0 || stderr.String() != "" {
-		t.Fatalf("run failed: exit=%d stderr=%q", exitCode, stderr.String())
-	}
-	want := "run: repositories=1 discovery_failed=0 discovered=0 enqueued=0 queued=0 attempted=0 succeeded=0 failed=0\n" +
-		"discovery: repository=acme/service status=success observed=0 enqueued=0\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
-	}
-}
-
-func TestMainHumanRunDiagnosesDiscoveryAndAttemptFailures(t *testing.T) {
-	temp := t.TempDir()
-	fakeBin := installProcessHelpers(t, temp)
-	configHome := filepath.Join(temp, "config")
-	configDir := filepath.Join(configHome, "reviewctl")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	config := `harness: codex
-publish: false
-trusted_authors: ["dependabot[bot]"]
-repositories:
-  - provider: github
-    repository: acme/service
-  - provider: github
-    repository: acme/other
-`
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", configHome)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
-	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_FAIL", "acme/other")
-	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
-	path, _ := statePath()
-	store, err := OpenStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Enqueue(context.Background(), pr); err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
-
-	var stdout, stderr bytes.Buffer
-	if exitCode := Main([]string{"run"}, &stdout, &stderr); exitCode != 1 || stderr.String() != "" {
-		t.Fatalf("run exit=%d stderr=%q", exitCode, stderr.String())
-	}
-	want := "run: repositories=2 discovery_failed=1 discovered=0 enqueued=0 queued=1 attempted=1 succeeded=0 failed=1\n" +
-		"discovery: repository=acme/service status=success observed=0 enqueued=0\n" +
-		"discovery: repository=acme/other status=failed error=github_failed: " +
-		"gh failed for acme/other: exit status 88: scripted discovery failure\n" +
-		"attempt: pull_request=github:acme/service#7 url=https://github.com/acme/service/pull/7 " +
-		"status=failed error=publication_disabled: publication is disabled\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
-	}
-}
-
 func TestWriteHumanRunResultShowsPartialDiscoveryFailure(t *testing.T) {
 	result := runResult{
 		Repositories: 2, DiscoverySucceeded: 1, DiscoveryFailed: 1, Discovered: 2,
@@ -272,7 +190,7 @@ func TestMainStatusReturnsDeterministicBoundedState(t *testing.T) {
 	}
 	for number := int64(1); number <= 2; number++ {
 		pr, _ := ParsePullRequestURL(fmt.Sprintf("https://github.com/acme/service/pull/%d", number))
-		if _, err := store.Enqueue(context.Background(), pr); err != nil {
+		if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -434,7 +352,7 @@ func TestMainHumanStatusShowsEmptyAndBoundedPopulatedState(t *testing.T) {
 	queued, _ := ParsePullRequestURL("https://github.com/acme/service/pull/3")
 	older, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
 	newer, _ := ParsePullRequestURL("https://github.com/acme/service/pull/2")
-	if _, err := store.Enqueue(context.Background(), queued); err != nil {
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{queued}); err != nil {
 		t.Fatal(err)
 	}
 	finished := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)

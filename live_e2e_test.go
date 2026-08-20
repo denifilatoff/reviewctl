@@ -125,10 +125,26 @@ func TestLiveE2EHelper(t *testing.T) {
 	case "codex":
 	case "apm":
 	case "sqlite3":
-		if strings.Contains(strings.Join(args, " "), "history") {
+		query := strings.Join(args, " ")
+		runs := readTestCounter(os.Getenv("REVIEWCTL_LIVE_RUN_STATE"))
+		if strings.Contains(query, "repository_baselines") {
+			fmt.Println("1")
+		} else if strings.Contains(query, "success = 1") {
 			fmt.Println("2")
+		} else if strings.Contains(query, "success = 0") {
+			fmt.Println("1")
+		} else if strings.Contains(query, "history") {
+			if runs <= 2 {
+				fmt.Println("1")
+			} else {
+				fmt.Println("3")
+			}
 		} else {
-			fmt.Println("0")
+			if runs <= 2 {
+				fmt.Println("1")
+			} else {
+				fmt.Println("0")
+			}
 		}
 	case "reviewctl":
 		if len(args) < 2 {
@@ -143,8 +159,16 @@ func TestLiveE2EHelper(t *testing.T) {
 		if os.WriteFile(runState, []byte(strconv.Itoa(runs+1)), 0o600) != nil {
 			os.Exit(83)
 		}
+		if runs == 0 {
+			fmt.Println(`{"command":"run","status":"success","discovery_succeeded":1,"queued":0,"attempted":0}`)
+			break
+		}
+		if runs == 1 {
+			fmt.Println(`{"command":"run","status":"failed","error":{"code":"publication_disabled"}}`)
+			os.Exit(1)
+		}
 		recovered := true
-		if os.Getenv("REVIEWCTL_LIVE_MODE") == "publish" && runs == 0 {
+		if os.Getenv("REVIEWCTL_LIVE_MODE") == "publish" && runs == 2 {
 			recovered = false
 			markerState := os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")
 			markers := readTestCounter(markerState)
@@ -152,7 +176,7 @@ func TestLiveE2EHelper(t *testing.T) {
 				os.Exit(84)
 			}
 		}
-		fmt.Printf("{\"command\":\"run\",\"recovered\":%t}\n", recovered)
+		fmt.Printf("{\"command\":\"run\",\"verdict\":\"COMMENT\",\"recovered\":%t}\n", recovered)
 	default:
 		os.Exit(85)
 	}

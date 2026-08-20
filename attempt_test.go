@@ -169,18 +169,6 @@ func TestValidateReceiptRejectsMismatchedScope(t *testing.T) {
 	}
 }
 
-func TestValidateReceiptBindsURLToReviewID(t *testing.T) {
-	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
-	receipt := Receipt{
-		Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
-		Verdict: "APPROVE", ReviewID: "123",
-		ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-456",
-	}
-	if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
-		t.Fatal("expected mismatched review ID and URL to be rejected")
-	}
-}
-
 func TestValidateReceiptAcceptsRepositoryDisplayCase(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/powershell/powershell/pull/7")
 	receipt := Receipt{

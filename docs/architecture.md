@@ -308,7 +308,7 @@ normalize features that GitHub and Codex do not need.
 ## CLI surface
 
 ```text
-reviewctl [--json] init --repository <owner/name> --trusted-author <login>...
+reviewctl [--json] init
 reviewctl [--json] doctor
 reviewctl [--json] review <pull-request-url>
 reviewctl [--json] bulk-review <pull-request-url>...
@@ -399,9 +399,10 @@ documented idempotent no-op results.
 
 A local live end-to-end test uses the real GitHub and Codex credentials only on the
 [canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It rechecks the repository, pull request,
-author, open non-draft state, and head before Codex. It then verifies the published review and history, enqueues the
-fixture again, and verifies marker recovery without duplicate publication. Missing live prerequisites block this test
-rather than turning it into a passing skip.
+author, open non-draft state, head, and absence of the exact marker before Codex. It establishes the discovery
+baseline, records one publication-disabled retryable failure, verifies a published `COMMENT` review and history,
+enqueues the fixture again, and verifies marker recovery without duplicate publication. Missing live prerequisites
+block this test rather than turning it into a passing skip.
 
 ## Non-goals
 

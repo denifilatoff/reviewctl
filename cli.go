@@ -637,6 +637,8 @@ const helpText = `Usage:
   reviewctl --help
   reviewctl --version
 
+init creates the configuration and state paths without replacing an existing configuration.
+doctor checks the configuration, GitHub, Codex, APM, state, and required paths.
 review updates only the local queue and never invokes Codex.
 bulk-review validates and updates the local queue in one transaction.
 status prints the pending queue and recent history.
