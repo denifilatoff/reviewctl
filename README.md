@@ -120,9 +120,9 @@ Run all local checks without publishing a review:
 reviewctl --json doctor
 ```
 
-`doctor` checks configuration, GitHub authentication and configured repository access, Codex login, the frozen APM
-skill, SQLite state, and required paths. It runs checks sequentially and reports every prerequisite. A failed check
-returns exit code 1.
+`doctor` checks configuration, GitHub authentication and configured repository access, Codex login and attempt-option
+compatibility without starting a model, the frozen APM skill, SQLite state, and required paths. It runs checks
+sequentially and reports every prerequisite. A failed check returns exit code 1.
 
 ## Schedule with launchd
 

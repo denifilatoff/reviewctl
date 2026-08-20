@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -407,6 +406,7 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 		"XDG_CACHE_HOME="+filepath.Join(temp, "cache"),
 		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
 		"REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS="+filepath.Join(temp, "github-calls"),
+		"REVIEWCTL_FAKE_DOCTOR_CODEX_CALLS="+filepath.Join(temp, "codex-calls"),
 	)
 	result := runCLI(t, env, binary, "--json", "doctor")
 	checks, _ := result.object["prerequisites"].([]any)
@@ -424,6 +424,31 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 	githubCalls, err := os.ReadFile(filepath.Join(temp, "github-calls"))
 	if err != nil || string(githubCalls) != "auth\nrepo:acme/service\nrepo:acme/other\n" {
 		t.Fatalf("GitHub doctor calls = %q, err = %v", githubCalls, err)
+	}
+	codexCalls, err := os.ReadFile(filepath.Join(temp, "codex-calls"))
+	if err != nil || string(codexCalls) != "login\nprobe\n" {
+		t.Fatalf("Codex doctor calls = %q, err = %v", codexCalls, err)
+	}
+	for _, signal := range []string{"incompatible", "other-exit-one"} {
+		t.Run(signal, func(t *testing.T) {
+			calls := filepath.Join(temp, "codex-calls-"+signal)
+			probeEnv := append(append([]string{}, env...),
+				"REVIEWCTL_FAKE_DOCTOR_CODEX_CALLS="+calls,
+				"REVIEWCTL_FAKE_DOCTOR_CODEX_SIGNAL="+signal,
+			)
+			result := runCLI(t, probeEnv, binary, "--json", "doctor")
+			checks, _ := result.object["prerequisites"].([]any)
+			codex := checks[2].(map[string]any)
+			errorObject, _ := codex["error"].(map[string]any)
+			if result.exitCode != 1 || result.stderr != "" || result.object["status"] != "failed" ||
+				codex["ready"] != false || errorObject["code"] != "codex_failed" {
+				t.Fatalf("doctor probe %s = %+v", signal, result)
+			}
+			data, err := os.ReadFile(calls)
+			if err != nil || string(data) != "login\nprobe\n" {
+				t.Fatalf("Codex doctor calls = %q, err = %v", data, err)
+			}
+		})
 	}
 
 	if err := os.WriteFile(configFile, []byte("not: valid\n"), 0o600); err != nil {
@@ -1016,8 +1041,10 @@ repositories:
 	helpOutput, err := help.CombinedOutput()
 	if err != nil || !bytes.Contains(helpOutput, []byte("init creates")) ||
 		!bytes.Contains(helpOutput, []byte("doctor checks")) ||
+		!bytes.Contains(helpOutput, []byte("Agent workflow: doctor -> review/bulk-review -> run -> status.")) ||
+		!bytes.Contains(helpOutput, []byte("Place the global --json flag before the command.")) ||
 		!bytes.Contains(helpOutput, []byte("review updates only the local queue")) ||
-		!bytes.Contains(helpOutput, []byte("run processes one queue snapshot and may publish GitHub reviews")) {
+		!bytes.Contains(helpOutput, []byte("Only run invokes a Codex model and may publish GitHub reviews.")) {
 		t.Fatalf("help err=%v output=%q", err, helpOutput)
 	}
 
@@ -1366,8 +1393,7 @@ func helperGH(args []string) {
 	os.Exit(92)
 }
 
-func appendDoctorGitHubCall(call string) {
-	path := os.Getenv("REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS")
+func appendDoctorCall(path, call string) {
 	if path == "" {
 		return
 	}
@@ -1379,6 +1405,14 @@ func appendDoctorGitHubCall(call string) {
 	if file.Close() != nil {
 		os.Exit(72)
 	}
+}
+
+func appendDoctorGitHubCall(call string) {
+	appendDoctorCall(os.Getenv("REVIEWCTL_FAKE_DOCTOR_GITHUB_CALLS"), call)
+}
+
+func appendDoctorCodexCall(call string) {
+	appendDoctorCall(os.Getenv("REVIEWCTL_FAKE_DOCTOR_CODEX_CALLS"), call)
 }
 
 func helperAPM(args []string) {
@@ -1414,6 +1448,7 @@ func helperAPM(args []string) {
 
 func helperCodex(args []string) {
 	if len(args) == 2 && args[0] == "login" && args[1] == "status" {
+		appendDoctorCodexCall("login")
 		if os.Getenv("REVIEWCTL_FAKE_DOCTOR_CODEX_FAIL") != "" {
 			fmt.Fprintln(os.Stderr, "scripted Codex failure")
 			os.Exit(74)
@@ -1421,9 +1456,30 @@ func helperCodex(args []string) {
 		fmt.Println("Logged in")
 		return
 	}
-	if !slices.Contains(args, "--approve-for-me") || slices.Contains(args, "--sandbox") {
-		fmt.Fprintln(os.Stderr, "Codex attempt requires --approve-for-me without --sandbox")
+	if len(args) != 11 || args[0] != "exec" || args[1] != "--ephemeral" || args[2] != "--approve-for-me" ||
+		args[3] != "--color" || args[4] != "never" || args[5] != "--cd" || args[6] == "" ||
+		args[7] != "--skip-git-repo-check" || args[8] != "-o" || args[9] == "" || args[10] != "-" {
+		fmt.Fprintln(os.Stderr, "Codex attempt arguments are incompatible")
 		os.Exit(2)
+	}
+	if args[6] == os.TempDir() && args[9] == os.DevNull {
+		appendDoctorCodexCall("probe")
+		input, err := io.ReadAll(os.Stdin)
+		if err != nil || len(input) != 0 {
+			fmt.Fprintln(os.Stderr, "Codex compatibility probe requires stdin EOF")
+			os.Exit(2)
+		}
+		switch os.Getenv("REVIEWCTL_FAKE_DOCTOR_CODEX_SIGNAL") {
+		case "incompatible":
+			fmt.Fprintln(os.Stderr, "Codex attempt arguments are incompatible")
+			os.Exit(2)
+		case "other-exit-one":
+			fmt.Fprintln(os.Stderr, "unrelated Codex failure")
+			os.Exit(1)
+		default:
+			fmt.Fprintln(os.Stderr, "No prompt provided via stdin.")
+			os.Exit(1)
+		}
 	}
 	if ready := os.Getenv("REVIEWCTL_FAKE_CODEX_READY"); ready != "" {
 		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")

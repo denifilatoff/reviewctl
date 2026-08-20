@@ -36,6 +36,11 @@ type Receipt struct {
 	Recovered   bool        `json:"recovered"`
 }
 
+func codexExecArgs(workspace, receiptPath string) []string {
+	return []string{"exec", "--ephemeral", "--approve-for-me", "--color", "never", "--cd", workspace,
+		"--skip-git-repo-check", "-o", receiptPath, "-"}
+}
+
 func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string, selfAuthored bool) error {
 	if receipt.Provider != expected.Provider || strings.ToLower(receipt.Repository) != expected.Repository ||
 		receipt.Number != expected.Number || receipt.HeadSHA != head || receipt.SkillDigest != digest {
@@ -146,9 +151,8 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("workspace_failed", "write trusted instruction: %v", err))
 		return result
 	}
-	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
-		"--approve-for-me", "--color", "never", "--cd", workspace,
-		"--skip-git-repo-check", "-o", receiptPath, "-"); err != nil {
+	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex",
+		codexExecArgs(workspace, receiptPath)...); err != nil {
 		setAttemptError(&result, fail("codex_failed", "%v", err))
 		return result
 	}

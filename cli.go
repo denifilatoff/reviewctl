@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -141,7 +142,7 @@ func doctorCommand(stdout io.Writer, jsonMode bool) int {
 	} else {
 		checks = append(checks, doctorResultFor("github", "github_failed", checkGitHubAccess(cfg)))
 	}
-	checks = append(checks, doctorResultFor("codex", "codex_failed", checkCommand("codex", "login", "status")))
+	checks = append(checks, doctorResultFor("codex", "codex_failed", checkCodex()))
 	checks = append(checks, doctorResultFor("apm", "apm_failed", checkLockedSkills()))
 	checks = append(checks, doctorResultFor("state", "state_failed", checkState()))
 	checks = append(checks, doctorResultFor("paths", "paths_failed", checkRequiredPaths()))
@@ -178,6 +179,22 @@ func checkCommand(name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return runCommand(ctx, "", nil, name, args...)
+}
+
+func checkCodex() error {
+	if err := checkCommand("codex", "login", "status"); err != nil {
+		return err
+	}
+	err := checkCommand("codex", codexExecArgs(os.TempDir(), os.DevNull)...)
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) && exitError.ExitCode() == 1 &&
+		strings.HasSuffix(err.Error(), "No prompt provided via stdin.") {
+		return nil
+	}
+	if err == nil {
+		return errors.New("codex compatibility probe returned success instead of the expected stdin error")
+	}
+	return err
 }
 
 func checkGitHubAccess(cfg Config) error {
@@ -637,10 +654,14 @@ const helpText = `Usage:
   reviewctl --help
   reviewctl --version
 
+Agent workflow: doctor -> review/bulk-review -> run -> status.
+Place the global --json flag before the command.
+Only run invokes a Codex model and may publish GitHub reviews.
+
 init creates the configuration and state paths without replacing an existing configuration.
 doctor checks the configuration, GitHub, Codex, APM, state, and required paths.
 review updates only the local queue and never invokes Codex.
 bulk-review validates and updates the local queue in one transaction.
 status prints the pending queue and recent history.
-run processes one queue snapshot and may publish GitHub reviews when publication is enabled.
+run processes one queue snapshot.
 `
