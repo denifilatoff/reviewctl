@@ -86,6 +86,63 @@ func TestAttemptTimeoutBoundsPreCodexDescendant(t *testing.T) {
 	testInterruptedAttempt(t, 10*time.Second, false, true, "apm_failed")
 }
 
+func TestRawGitHubCommandsCleanNonzeroDescendants(t *testing.T) {
+	for _, target := range []string{"view", "login"} {
+		t.Run(target, func(t *testing.T) {
+			temp := t.TempDir()
+			fakeBin := installProcessHelpers(t, temp)
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ready := filepath.Join(temp, "gh-ready")
+			heartbeatPath := filepath.Join(temp, "gh-descendant-heartbeat")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, self, "-test.run=TestRawGitHubCommandProcess")
+			command.Env = append(os.Environ(),
+				"GO_WANT_REVIEWCTL_HELPER=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"REVIEWCTL_FAKE_RAW_GITHUB_TARGET="+target,
+				"REVIEWCTL_FAKE_RAW_GITHUB_READY="+ready,
+				"REVIEWCTL_FAKE_DESCENDANT_SURVIVED="+heartbeatPath,
+			)
+			var output bytes.Buffer
+			command.Stdout, command.Stderr = &output, &output
+			started := time.Now()
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			waitForPath(t, ready)
+			waitForPath(t, heartbeatPath)
+			pidData, err := os.ReadFile(ready)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descendantPID, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(descendantPID, syscall.SIGKILL) })
+			if err := command.Wait(); err != nil {
+				t.Fatalf("raw GitHub command process failed: %v\n%s", err, output.Bytes())
+			}
+			if ctx.Err() != nil || time.Since(started) >= 8*time.Second {
+				t.Fatalf("raw GitHub command was not bounded: elapsed=%s context=%v", time.Since(started), ctx.Err())
+			}
+			heartbeat, err := os.ReadFile(heartbeatPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(300 * time.Millisecond)
+			after, err := os.ReadFile(heartbeatPath)
+			if err != nil || !bytes.Equal(heartbeat, after) {
+				t.Fatalf("raw GitHub descendant survived cleanup: before=%q after=%q err=%v", heartbeat, after, err)
+			}
+		})
+	}
+}
+
 func TestCancellationKillsCodexDescendantAndRetainsQueue(t *testing.T) {
 	testInterruptedAttempt(t, 30*time.Second, true, false, "attempt_canceled")
 }
@@ -306,6 +363,9 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun, preC
 	queue, history, _ := store.Status(context.Background(), 2)
 	if len(queue) != 1 || len(history) != 1 || history[0].ErrorCode != wantCode || len(history[0].ErrorMessage) > 512 {
 		t.Fatalf("queue=%+v history=%+v", queue, history)
+	}
+	if preCodex && history[0].ErrorMessage != "apm failed: exit status 75: " {
+		t.Fatalf("APM failure message = %q", history[0].ErrorMessage)
 	}
 	heartbeat, err := os.ReadFile(survived)
 	if err != nil {
@@ -1106,6 +1166,25 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestRawGitHubCommandProcess(t *testing.T) {
+	target := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
+	if target == "" {
+		return
+	}
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	var err error
+	if target == "view" {
+		_, err = resolveGitHub(context.Background(), pr)
+	} else {
+		_, err = resolveGitHubLogin(context.Background())
+	}
+	var coded *codedError
+	if !errors.As(err, &coded) || coded.code != "github_failed" ||
+		err.Error() != "gh failed: exit status 76: scripted raw GitHub failure" {
+		t.Fatalf("raw GitHub error = %v", err)
+	}
+}
+
 func TestCodexDescendantProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_REVIEWCTL_DESCENDANT") != "1" {
 		return
@@ -1150,6 +1229,23 @@ func helperGit(args []string) {
 }
 
 func helperGH(args []string) {
+	rawTarget := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
+	rawView := rawTarget == "view" && len(args) == 5 && args[0] == "pr" && args[1] == "view" &&
+		args[2] == "https://github.com/acme/service/pull/7" &&
+		args[3] == "--json" && args[4] == "url,number,state,isDraft,headRefOid,author"
+	rawLogin := rawTarget == "login" && len(args) == 4 && args[0] == "api" && args[1] == "user" &&
+		args[2] == "--jq" && args[3] == ".login"
+	if rawView || rawLogin {
+		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")
+		descendant.Env = append(os.Environ(), "GO_WANT_REVIEWCTL_DESCENDANT=1")
+		descendant.Stdout, descendant.Stderr = os.Stdout, os.Stderr
+		if descendant.Start() != nil || os.WriteFile(os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_READY"),
+			[]byte(strconv.Itoa(descendant.Process.Pid)), 0o600) != nil {
+			os.Exit(76)
+		}
+		fmt.Fprintln(os.Stderr, "scripted raw GitHub failure")
+		os.Exit(76)
+	}
 	if len(args) == 2 && args[0] == "auth" && args[1] == "status" {
 		appendDoctorGitHubCall("auth")
 		if os.Getenv("REVIEWCTL_FAKE_DOCTOR_GITHUB_FAIL") != "" {
@@ -1307,7 +1403,7 @@ func helperAPM(args []string) {
 			os.WriteFile(ready, []byte(root+"\n"+strconv.Itoa(descendant.Process.Pid)), 0o600) != nil {
 			os.Exit(93)
 		}
-		return
+		os.Exit(75)
 	}
 	dir := filepath.Join(root, ".agents", "skills", "adversarial-code-review")
 	if os.MkdirAll(dir, 0o700) != nil || os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("review"), 0o600) != nil {

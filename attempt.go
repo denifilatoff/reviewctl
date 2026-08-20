@@ -199,14 +199,25 @@ func installLockedSkills(ctx context.Context, workspace string) (string, error) 
 
 func runCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
+	prepareProcessGroup(command)
+	return cleanupProcessGroup(command, executeCommand(ctx, command, dir, stdin, name))
+}
+
+func prepareProcessGroup(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error { return killProcessGroup(command.Process.Pid) }
 	command.WaitDelay = time.Second
-	err := executeCommand(ctx, command, dir, stdin, name)
-	if errors.Is(err, exec.ErrWaitDelay) {
-		return errors.Join(err, killProcessGroup(command.Process.Pid))
+}
+
+func cleanupProcessGroup(command *exec.Cmd, commandErr error) error {
+	if commandErr == nil || command.Process == nil {
+		return commandErr
 	}
-	return err
+	cleanupErr := killProcessGroup(command.Process.Pid)
+	if cleanupErr == nil || errors.Is(cleanupErr, os.ErrProcessDone) {
+		return commandErr
+	}
+	return errors.Join(commandErr, cleanupErr)
 }
 
 func killProcessGroup(pid int) error {
@@ -236,9 +247,10 @@ func executeCommand(ctx context.Context, command *exec.Cmd, dir string, stdin io
 
 func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, error) {
 	command := exec.CommandContext(ctx, "gh", "pr", "view", pr.URL, "--json", "url,number,state,isDraft,headRefOid,author")
+	prepareProcessGroup(command)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
+	if err := cleanupProcessGroup(command, command.Run()); err != nil {
 		return GitHubPullRequest{}, fail("github_failed", "gh failed: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	var wire struct {
@@ -262,9 +274,10 @@ func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, erro
 
 func resolveGitHubLogin(ctx context.Context) (string, error) {
 	command := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login")
+	prepareProcessGroup(command)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
-	if err := command.Run(); err != nil {
+	if err := cleanupProcessGroup(command, command.Run()); err != nil {
 		return "", fail("github_failed", "gh failed: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	login := normalizeGitHubLogin(stdout.String())
