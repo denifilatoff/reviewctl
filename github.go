@@ -52,9 +52,9 @@ func shouldEnqueueDiscovery(initialized bool, previous *pullRequestSnapshot, cur
 }
 
 func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullRequestSnapshot, error) {
-	// ponytail: The 1,000-PR limit avoids custom pagination; use gh api --paginate if a repository can exceed it.
+	// ponytail: The sentinel avoids pagination until a repository exceeds 1,000 open PRs.
 	command := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repository.Repository, "--state", "open",
-		"--limit", "1000", "--json", "url,number,state,isDraft,headRefOid")
+		"--limit", "1001", "--json", "url,number,state,isDraft,headRefOid")
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Run(); err != nil {
@@ -70,6 +70,11 @@ func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullR
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return nil, fail("github_failed", "decode gh response for %s: %v", repository.Repository, err)
+	}
+	if len(response) >= 1001 {
+		return nil, fail("github_snapshot_too_large",
+			"repository %s has more than 1,000 open pull requests; add pagination before discovery can continue",
+			repository.Repository)
 	}
 	snapshot := make([]pullRequestSnapshot, len(response))
 	seen := make(map[int64]bool, len(response))

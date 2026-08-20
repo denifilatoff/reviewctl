@@ -35,7 +35,137 @@ func TestMainHumanRunPrintsSummary(t *testing.T) {
 	if exitCode != 0 || stderr.String() != "" {
 		t.Fatalf("run failed: exit=%d stderr=%q", exitCode, stderr.String())
 	}
-	want := "run: repositories=1 discovery_failed=0 discovered=0 enqueued=0 queued=0 attempted=0 succeeded=0 failed=0\n"
+	want := "run: repositories=1 discovery_failed=0 discovered=0 enqueued=0 queued=0 attempted=0 succeeded=0 failed=0\n" +
+		"discovery: repository=acme/service status=success observed=0 enqueued=0\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestMainHumanRunDiagnosesDiscoveryAndAttemptFailures(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	configHome := filepath.Join(temp, "config")
+	configDir := filepath.Join(configHome, "reviewctl")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `harness: codex
+publish: false
+trusted_authors: ["dependabot[bot]"]
+repositories:
+  - provider: github
+    repository: acme/service
+  - provider: github
+    repository: acme/other
+`
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(temp, "state"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(temp, "runtime"))
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_FAIL", "acme/other")
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	path, _ := statePath()
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Enqueue(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	var stdout, stderr bytes.Buffer
+	if exitCode := Main([]string{"run"}, &stdout, &stderr); exitCode != 1 || stderr.String() != "" {
+		t.Fatalf("run exit=%d stderr=%q", exitCode, stderr.String())
+	}
+	want := "run: repositories=2 discovery_failed=1 discovered=0 enqueued=0 queued=1 attempted=1 succeeded=0 failed=1\n" +
+		"discovery: repository=acme/service status=success observed=0 enqueued=0\n" +
+		"discovery: repository=acme/other status=failed error=github_failed: " +
+		"gh failed for acme/other: exit status 88: scripted discovery failure\n" +
+		"attempt: pull_request=github:acme/service#7 url=https://github.com/acme/service/pull/7 " +
+		"status=failed error=publication_disabled: publication is disabled\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestWriteHumanRunResultShowsPartialDiscoveryFailure(t *testing.T) {
+	result := runResult{
+		Repositories: 2, DiscoverySucceeded: 1, DiscoveryFailed: 1, Discovered: 2,
+		Discovery: []discoveryItem{
+			{Provider: "github", Repository: "acme/service", Status: "success", Observed: 2},
+			{
+				Provider: "github", Repository: "acme/other", Status: "failed",
+				Error: &resultError{Code: "github_failed", Message: "scripted discovery failure"},
+			},
+		},
+		Results: []runItem{},
+	}
+	var stdout bytes.Buffer
+	writeHumanRunResult(&stdout, result)
+	want := "run: repositories=2 discovery_failed=1 discovered=2 enqueued=0 queued=0 attempted=0 succeeded=0 failed=0\n" +
+		"discovery: repository=acme/service status=success observed=2 enqueued=0\n" +
+		"discovery: repository=acme/other status=failed error=github_failed: scripted discovery failure\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestWriteHumanRunResultShowsAttemptFailure(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	result := runResult{
+		Repositories: 1, Queued: 1, Attempted: 1, Failed: 1, Discovery: []discoveryItem{},
+		Results: []runItem{{
+			PullRequest: pr, Status: "failed",
+			Error: &resultError{Code: "publication_disabled", Message: "publication is disabled"},
+		}},
+	}
+	var stdout bytes.Buffer
+	writeHumanRunResult(&stdout, result)
+	want := "run: repositories=1 discovery_failed=0 discovered=0 enqueued=0 queued=1 attempted=1 succeeded=0 failed=1\n" +
+		"attempt: pull_request=github:acme/service#7 url=https://github.com/acme/service/pull/7 " +
+		"status=failed error=publication_disabled: publication is disabled\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestWriteHumanRunResultPreservesSuccessOrdering(t *testing.T) {
+	first, _ := ParsePullRequestURL("https://github.com/acme/service/pull/9")
+	second, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	result := runResult{
+		Repositories: 2, DiscoverySucceeded: 2, Discovered: 3, Enqueued: 2,
+		Discovery: []discoveryItem{
+			{Provider: "github", Repository: "acme/service", Status: "success", Observed: 2, Enqueued: 1},
+			{Provider: "github", Repository: "acme/other", Status: "success", Observed: 1, Enqueued: 1},
+		},
+		Queued: 2, Attempted: 2, Succeeded: 2,
+		Results: []runItem{
+			{
+				PullRequest: first, Status: "success", Verdict: "APPROVE",
+				ReviewURL: first.URL + "#pullrequestreview-9",
+			},
+			{
+				PullRequest: second, Status: "success", Verdict: "REQUEST_CHANGES",
+				ReviewURL: second.URL + "#pullrequestreview-7", Recovered: true,
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	writeHumanRunResult(&stdout, result)
+	want := "run: repositories=2 discovery_failed=0 discovered=3 enqueued=2 queued=2 attempted=2 succeeded=2 failed=0\n" +
+		"discovery: repository=acme/service status=success observed=2 enqueued=1\n" +
+		"discovery: repository=acme/other status=success observed=1 enqueued=1\n" +
+		"attempt: pull_request=github:acme/service#9 url=https://github.com/acme/service/pull/9 " +
+		"status=success verdict=APPROVE review_url=https://github.com/acme/service/pull/9#pullrequestreview-9 recovered=false\n" +
+		"attempt: pull_request=github:acme/service#7 url=https://github.com/acme/service/pull/7 " +
+		"status=success verdict=REQUEST_CHANGES " +
+		"review_url=https://github.com/acme/service/pull/7#pullrequestreview-7 recovered=true\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}

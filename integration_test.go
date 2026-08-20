@@ -225,6 +225,56 @@ repositories:
 	}
 }
 
+func TestGitHubDiscoverySentinelPreservesBaseline(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_DIR", discoveryDir)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	first := fakeDiscoveryPR{
+		URL: "https://github.com/acme/service/pull/1", Number: 1, State: "OPEN", HeadRefOID: "a",
+	}
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{first})
+	store := openTestStore(t)
+	cfg := Config{Repositories: []Repository{repository}}
+	result := discoverRepositories(context.Background(), cfg, store)
+	if len(result) != 1 || result[0].Status != "success" || result[0].Observed != 1 || result[0].Enqueued != 0 {
+		t.Fatalf("first discovery = %+v", result)
+	}
+
+	sentinel := make([]fakeDiscoveryPR, 1001)
+	for i := range sentinel {
+		number := int64(i + 1)
+		sentinel[i] = fakeDiscoveryPR{
+			URL: fmt.Sprintf("https://github.com/acme/service/pull/%d", number), Number: number, State: "OPEN",
+			IsDraft: number != 1, HeadRefOID: "a",
+		}
+	}
+	sentinel[0].HeadRefOID = "b"
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, sentinel)
+	result = discoverRepositories(context.Background(), cfg, store)
+	if len(result) != 1 || result[0].Status != "failed" || result[0].Error == nil ||
+		result[0].Error.Code != "github_snapshot_too_large" {
+		t.Fatalf("sentinel discovery = %+v", result)
+	}
+	queue, err := store.Snapshot(context.Background())
+	if err != nil || len(queue) != 0 {
+		t.Fatalf("sentinel changed queue: queue=%+v err=%v", queue, err)
+	}
+
+	first.HeadRefOID = "b"
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{first})
+	result = discoverRepositories(context.Background(), cfg, store)
+	if len(result) != 1 || result[0].Status != "success" || result[0].Enqueued != 1 {
+		t.Fatalf("sentinel advanced baseline: discovery=%+v", result)
+	}
+}
+
 func assertRunCounts(t *testing.T, result cliResult, wantExit int, wants map[string]float64) {
 	t.Helper()
 	if result.exitCode != wantExit || result.stderr != "" {
@@ -243,6 +293,23 @@ func writeDiscoveryFixture(t *testing.T, dir, repository, body string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type fakeDiscoveryPR struct {
+	URL        string `json:"url"`
+	Number     int64  `json:"number"`
+	State      string `json:"state"`
+	IsDraft    bool   `json:"isDraft"`
+	HeadRefOID string `json:"headRefOid"`
+}
+
+func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fakeDiscoveryPR) {
+	t.Helper()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDiscoveryFixture(t, dir, repository, string(data))
 }
 
 func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
@@ -384,7 +451,7 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) == 10 && args[0] == "pr" && args[1] == "list" && args[2] == "--repo" &&
-		args[4] == "--state" && args[5] == "open" && args[6] == "--limit" && args[7] == "1000" &&
+		args[4] == "--state" && args[5] == "open" && args[6] == "--limit" && args[7] == "1001" &&
 		args[8] == "--json" && args[9] == "url,number,state,isDraft,headRefOid" {
 		repository := args[3]
 		if calls := os.Getenv("REVIEWCTL_FAKE_GH_CALLS"); calls != "" {
@@ -429,13 +496,7 @@ func helperGH(args []string) {
 			if err != nil {
 				os.Exit(86)
 			}
-			var snapshot []struct {
-				URL        string `json:"url"`
-				Number     int64  `json:"number"`
-				State      string `json:"state"`
-				IsDraft    bool   `json:"isDraft"`
-				HeadRefOID string `json:"headRefOid"`
-			}
+			var snapshot []fakeDiscoveryPR
 			if json.Unmarshal(data, &snapshot) != nil {
 				os.Exit(86)
 			}

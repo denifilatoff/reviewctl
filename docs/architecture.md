@@ -125,6 +125,9 @@ Later polls enqueue a pull request when:
 The fetched GitHub snapshot is obtained outside a database transaction. Queue inserts and the corresponding baseline
 update use one short SQLite transaction, so a crash cannot advance the baseline without recording the work.
 
+Discovery requests a 1,001-item sentinel through `gh`. A repository with more than 1,000 open pull requests fails
+discovery without changing its baseline or queue; supporting that repository requires pagination.
+
 A skill or trust-list change does not enqueue every open pull request. The user may enqueue selected pull requests
 explicitly.
 

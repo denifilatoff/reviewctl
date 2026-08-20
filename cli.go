@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -41,6 +42,22 @@ type discoveryItem struct {
 	Observed   int          `json:"observed"`
 	Enqueued   int          `json:"enqueued"`
 	Error      *resultError `json:"error,omitempty"`
+}
+
+type runResult struct {
+	Command            string          `json:"command"`
+	Status             string          `json:"status"`
+	Repositories       int             `json:"repositories"`
+	DiscoverySucceeded int             `json:"discovery_succeeded"`
+	DiscoveryFailed    int             `json:"discovery_failed"`
+	Discovered         int             `json:"discovered"`
+	Enqueued           int             `json:"enqueued"`
+	Discovery          []discoveryItem `json:"discovery"`
+	Queued             int             `json:"queued"`
+	Attempted          int             `json:"attempted"`
+	Succeeded          int             `json:"succeeded"`
+	Failed             int             `json:"failed"`
+	Results            []runItem       `json:"results"`
 }
 
 func Main(args []string, stdout, stderr io.Writer) int {
@@ -257,21 +274,7 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "run", 1, "state_failed", err.Error())
 	}
-	result := struct {
-		Command            string          `json:"command"`
-		Status             string          `json:"status"`
-		Repositories       int             `json:"repositories"`
-		DiscoverySucceeded int             `json:"discovery_succeeded"`
-		DiscoveryFailed    int             `json:"discovery_failed"`
-		Discovered         int             `json:"discovered"`
-		Enqueued           int             `json:"enqueued"`
-		Discovery          []discoveryItem `json:"discovery"`
-		Queued             int             `json:"queued"`
-		Attempted          int             `json:"attempted"`
-		Succeeded          int             `json:"succeeded"`
-		Failed             int             `json:"failed"`
-		Results            []runItem       `json:"results"`
-	}{
+	result := runResult{
 		Command: "run", Status: "success", Repositories: len(cfg.Repositories), Discovery: discovery,
 		Queued: len(queue), Results: []runItem{},
 	}
@@ -309,12 +312,46 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 	if jsonMode {
 		writeResult(stdout, true, result)
 	} else {
-		fmt.Fprintf(stdout,
-			"run: repositories=%d discovery_failed=%d discovered=%d enqueued=%d queued=%d attempted=%d succeeded=%d failed=%d\n",
-			result.Repositories, result.DiscoveryFailed, result.Discovered, result.Enqueued, result.Queued,
-			result.Attempted, result.Succeeded, result.Failed)
+		writeHumanRunResult(stdout, result)
 	}
 	return exitCode
+}
+
+func writeHumanRunResult(stdout io.Writer, result runResult) {
+	fmt.Fprintf(stdout,
+		"run: repositories=%d discovery_failed=%d discovered=%d enqueued=%d queued=%d attempted=%d succeeded=%d failed=%d\n",
+		result.Repositories, result.DiscoveryFailed, result.Discovered, result.Enqueued, result.Queued,
+		result.Attempted, result.Succeeded, result.Failed)
+	for _, item := range result.Discovery {
+		if item.Status == "success" {
+			fmt.Fprintf(stdout, "discovery: repository=%s status=success observed=%d enqueued=%d\n",
+				item.Repository, item.Observed, item.Enqueued)
+			continue
+		}
+		code, message := humanError(item.Error)
+		fmt.Fprintf(stdout, "discovery: repository=%s status=failed error=%s: %s\n",
+			item.Repository, code, message)
+	}
+	for _, item := range result.Results {
+		identity := fmt.Sprintf("%s:%s#%d", item.Provider, item.Repository, item.Number)
+		if item.Status == "success" {
+			fmt.Fprintf(stdout,
+				"attempt: pull_request=%s url=%s status=success verdict=%s review_url=%s recovered=%t\n",
+				identity, item.URL, item.Verdict, item.ReviewURL, item.Recovered)
+			continue
+		}
+		code, message := humanError(item.Error)
+		fmt.Fprintf(stdout, "attempt: pull_request=%s url=%s status=failed error=%s: %s\n",
+			identity, item.URL, code, message)
+	}
+}
+
+func humanError(err *resultError) (string, string) {
+	if err == nil {
+		return "operational_failure", "missing error detail"
+	}
+	message := strings.NewReplacer("\r", " ", "\n", " ").Replace(err.Message)
+	return err.Code, bounded(message, 512)
 }
 
 func discoverRepositories(ctx context.Context, cfg Config, store *Store) []discoveryItem {
