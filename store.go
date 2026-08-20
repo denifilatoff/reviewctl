@@ -78,33 +78,105 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Enqueue(ctx context.Context, pr PullRequest) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at)
-		VALUES (?, ?, ?, ?, ?)`, pr.Provider, pr.Repository, pr.Number, pr.URL, time.Now().UTC().Format(time.RFC3339Nano))
+	added, err := s.EnqueueMany(ctx, []PullRequest{pr})
 	if err != nil {
-		return false, fmt.Errorf("enqueue pull request: %w", err)
+		return false, err
 	}
-	rows, err := result.RowsAffected()
-	return rows == 1, err
+	return added[0], nil
+}
+
+func (s *Store) EnqueueMany(ctx context.Context, pullRequests []PullRequest) ([]bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("start enqueue transaction: %w", err)
+	}
+	defer tx.Rollback()
+	added := make([]bool, len(pullRequests))
+	queuedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for i, pr := range pullRequests {
+		result, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at)
+			VALUES (?, ?, ?, ?, ?)`, pr.Provider, pr.Repository, pr.Number, pr.URL, queuedAt)
+		if err != nil {
+			return nil, fmt.Errorf("enqueue pull request: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("read enqueue result: %w", err)
+		}
+		added[i] = rows == 1
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit enqueue transaction: %w", err)
+	}
+	return added, nil
 }
 
 func (s *Store) Snapshot(ctx context.Context) ([]PullRequest, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	queue, _, err := s.Status(ctx, 0)
+	return queue, err
+}
+
+func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []Attempt, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("start status transaction: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
 		SELECT provider, repository, change_number, url FROM queue
 		WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM queue) ORDER BY id`)
 	if err != nil {
-		return nil, fmt.Errorf("read queue: %w", err)
+		return nil, nil, fmt.Errorf("read queue: %w", err)
 	}
-	defer rows.Close()
-	var result []PullRequest
+	queue := make([]PullRequest, 0)
 	for rows.Next() {
 		var pr PullRequest
 		if err := rows.Scan(&pr.Provider, &pr.Repository, &pr.Number, &pr.URL); err != nil {
-			return nil, fmt.Errorf("read queue entry: %w", err)
+			rows.Close()
+			return nil, nil, fmt.Errorf("read queue entry: %w", err)
 		}
-		result = append(result, pr)
+		queue = append(queue, pr)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, fmt.Errorf("read queue: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("read queue: %w", err)
+	}
+	rows, err = tx.QueryContext(ctx, `
+		SELECT provider, repository, change_number, url, head_sha, skill_digest, started_at, finished_at,
+			success, verdict, review_id, review_url, error_code, error_message FROM history ORDER BY id DESC LIMIT ?`,
+		historyLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read history: %w", err)
+	}
+	history := make([]Attempt, 0)
+	for rows.Next() {
+		var attempt Attempt
+		var started, finished string
+		if err := rows.Scan(&attempt.Provider, &attempt.Repository, &attempt.Number, &attempt.URL, &attempt.HeadSHA,
+			&attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
+			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage); err != nil {
+			rows.Close()
+			return nil, nil, fmt.Errorf("read history entry: %w", err)
+		}
+		attempt.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		attempt.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
+		history = append(history, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, fmt.Errorf("read history: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, fmt.Errorf("read history: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("commit status transaction: %w", err)
+	}
+	return queue, history, nil
 }
 
 func (s *Store) Finish(ctx context.Context, attempt Attempt) error {

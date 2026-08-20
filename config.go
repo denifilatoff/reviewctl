@@ -76,6 +76,52 @@ func statePath() (string, error) {
 	return defaultPath("XDG_STATE_HOME", ".local/state", "reviewctl.db")
 }
 
+const initialConfig = `harness: codex
+publish: false
+trusted_authors: []
+repositories: []
+`
+
+func initializePaths() (string, string, bool, error) {
+	config, err := configPath()
+	if err != nil {
+		return "", "", false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(config), 0o700); err != nil {
+		return "", "", false, fmt.Errorf("create config directory: %w", err)
+	}
+	created := false
+	file, err := os.OpenFile(config, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		created = true
+		if _, err = io.WriteString(file, initialConfig); err == nil {
+			err = file.Close()
+		} else {
+			_ = file.Close()
+		}
+		if err != nil {
+			_ = os.Remove(config)
+		}
+	} else if os.IsExist(err) {
+		err = nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("create config: %w", err)
+	}
+	state, err := statePath()
+	if err != nil {
+		return "", "", false, err
+	}
+	store, err := OpenStore(state)
+	if err != nil {
+		return "", "", false, err
+	}
+	if err := store.Close(); err != nil {
+		return "", "", false, fmt.Errorf("close state: %w", err)
+	}
+	return config, state, created, nil
+}
+
 func loadConfig() (Config, error) {
 	path, err := configPath()
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
@@ -27,6 +28,11 @@ type runItem struct {
 	Error     *resultError `json:"error,omitempty"`
 }
 
+type queueItem struct {
+	PullRequest PullRequest `json:"pull_request"`
+	Status      string      `json:"status"`
+}
+
 func Main(args []string, stdout, stderr io.Writer) int {
 	jsonMode := len(args) > 0 && args[0] == "--json"
 	if jsonMode {
@@ -44,11 +50,33 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return writeFailure(stdout, stderr, jsonMode, "", 2, "invalid_invocation", "command is required")
 	}
 	switch args[0] {
+	case "init":
+		if len(args) != 1 {
+			return writeFailure(stdout, stderr, jsonMode, "init", 2, "invalid_invocation", "init accepts no arguments")
+		}
+		return initCommand(stdout, stderr, jsonMode)
 	case "review":
 		if len(args) != 2 {
 			return writeFailure(stdout, stderr, jsonMode, "review", 2, "invalid_invocation", "review requires exactly one pull request URL")
 		}
 		return reviewCommand(args[1], stdout, stderr, jsonMode)
+	case "bulk-review":
+		if len(args) < 2 {
+			return writeFailure(stdout, stderr, jsonMode, "bulk-review", 2, "invalid_invocation", "bulk-review requires at least one pull request URL")
+		}
+		return bulkReviewCommand(args[1:], stdout, stderr, jsonMode)
+	case "status":
+		limit := 20
+		if len(args) == 3 && args[1] == "--limit" {
+			var err error
+			limit, err = strconv.Atoi(args[2])
+			if err != nil || limit < 1 {
+				return writeFailure(stdout, stderr, jsonMode, "status", 2, "invalid_limit", "status limit must be a positive integer")
+			}
+		} else if len(args) != 1 {
+			return writeFailure(stdout, stderr, jsonMode, "status", 2, "invalid_invocation", "status accepts only --limit <count>")
+		}
+		return statusCommand(limit, stdout, stderr, jsonMode)
 	case "run":
 		if len(args) != 1 {
 			return writeFailure(stdout, stderr, jsonMode, "run", 2, "invalid_invocation", "run accepts no arguments")
@@ -59,29 +87,102 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func initCommand(stdout, stderr io.Writer, jsonMode bool) int {
+	config, state, created, err := initializePaths()
+	if err != nil {
+		return writeFailure(stdout, stderr, jsonMode, "init", 1, "init_failed", err.Error())
+	}
+	return writeResult(stdout, jsonMode, map[string]any{
+		"command": "init", "status": "success", "config_path": config, "state_path": state, "config_created": created,
+	})
+}
+
 func reviewCommand(raw string, stdout, stderr io.Writer, jsonMode bool) int {
 	pr, err := ParsePullRequestURL(raw)
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "review", 2, "invalid_url", err.Error())
 	}
-	path, err := statePath()
+	results, err := enqueuePullRequests([]PullRequest{pr})
 	if err != nil {
 		return writeFailure(stdout, stderr, jsonMode, "review", 1, "state_failed", err.Error())
+	}
+	return writeResult(stdout, jsonMode, map[string]any{
+		"command": "review", "status": results[0].Status, "pull_request": results[0].PullRequest,
+	})
+}
+
+func bulkReviewCommand(raw []string, stdout, stderr io.Writer, jsonMode bool) int {
+	pullRequests := make([]PullRequest, len(raw))
+	for i := range raw {
+		pr, err := ParsePullRequestURL(raw[i])
+		if err != nil {
+			return writeFailure(stdout, stderr, jsonMode, "bulk-review", 2, "invalid_url", err.Error())
+		}
+		pullRequests[i] = pr
+	}
+	results, err := enqueuePullRequests(pullRequests)
+	if err != nil {
+		return writeFailure(stdout, stderr, jsonMode, "bulk-review", 1, "state_failed", err.Error())
+	}
+	if !jsonMode {
+		queued := 0
+		for _, result := range results {
+			if result.Status == "queued" {
+				queued++
+			}
+		}
+		fmt.Fprintf(stdout, "bulk-review: queued=%d already_queued=%d\n", queued, len(results)-queued)
+		return 0
+	}
+	return writeResult(stdout, true, map[string]any{"command": "bulk-review", "status": "success", "results": results})
+}
+
+func enqueuePullRequests(pullRequests []PullRequest) ([]queueItem, error) {
+	path, err := statePath()
+	if err != nil {
+		return nil, err
 	}
 	store, err := OpenStore(path)
 	if err != nil {
-		return writeFailure(stdout, stderr, jsonMode, "review", 1, "state_failed", err.Error())
+		return nil, err
 	}
 	defer store.Close()
-	added, err := store.Enqueue(context.Background(), pr)
+	added, err := store.EnqueueMany(context.Background(), pullRequests)
 	if err != nil {
-		return writeFailure(stdout, stderr, jsonMode, "review", 1, "state_failed", err.Error())
+		return nil, err
 	}
-	status := "already_queued"
-	if added {
-		status = "queued"
+	results := make([]queueItem, len(pullRequests))
+	for i, pr := range pullRequests {
+		status := "already_queued"
+		if added[i] {
+			status = "queued"
+		}
+		results[i] = queueItem{PullRequest: pr, Status: status}
 	}
-	return writeResult(stdout, jsonMode, map[string]any{"command": "review", "status": status, "pull_request": pr})
+	return results, nil
+}
+
+func statusCommand(limit int, stdout, stderr io.Writer, jsonMode bool) int {
+	path, err := statePath()
+	if err != nil {
+		return writeFailure(stdout, stderr, jsonMode, "status", 1, "state_failed", err.Error())
+	}
+	store, err := OpenStore(path)
+	if err != nil {
+		return writeFailure(stdout, stderr, jsonMode, "status", 1, "state_failed", err.Error())
+	}
+	defer store.Close()
+	queue, history, err := store.Status(context.Background(), limit)
+	if err != nil {
+		return writeFailure(stdout, stderr, jsonMode, "status", 1, "state_failed", err.Error())
+	}
+	if !jsonMode {
+		fmt.Fprintf(stdout, "status: queued=%d history=%d\n", len(queue), len(history))
+		return 0
+	}
+	return writeResult(stdout, true, map[string]any{
+		"command": "status", "status": "success", "queue": queue, "history": history,
+	})
 }
 
 func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
@@ -211,11 +312,16 @@ func (l *runLock) Close() error {
 }
 
 const helpText = `Usage:
+  reviewctl [--json] init
   reviewctl [--json] review <pull-request-url>
+  reviewctl [--json] bulk-review <pull-request-url>...
+  reviewctl [--json] status [--limit <count>]
   reviewctl [--json] run
   reviewctl --help
   reviewctl --version
 
 review updates only the local queue and never invokes Codex.
+bulk-review validates and updates the local queue in one transaction.
+status prints the pending queue and recent history.
 run processes one queue snapshot and may publish GitHub reviews when publication is enabled.
 `
