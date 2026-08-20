@@ -87,6 +87,15 @@ func TestCancellationKillsCodexDescendantAndRetainsQueue(t *testing.T) {
 }
 
 func TestCodexDescriptorLeakIsBounded(t *testing.T) {
+	testCodexDescriptorLeak(t, false, "codex_failed")
+}
+
+func TestCodexDescriptorLeakCleanupSurvivesCancellation(t *testing.T) {
+	testCodexDescriptorLeak(t, true, "attempt_canceled")
+}
+
+func testCodexDescriptorLeak(t *testing.T, cancelDuringWait bool, wantCode string) {
+	t.Helper()
 	temp := t.TempDir()
 	binary := filepath.Join(temp, "reviewctl")
 	build := exec.Command("go", "build", "-o", binary, ".")
@@ -104,6 +113,7 @@ func TestCodexDescriptorLeakIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready := filepath.Join(temp, "codex-leak-ready")
+	leaderExited := filepath.Join(temp, "codex-leader-exited")
 	heartbeatPath := filepath.Join(temp, "descendant-heartbeat")
 	env := append(os.Environ(),
 		"GO_WANT_REVIEWCTL_HELPER=1",
@@ -113,6 +123,7 @@ func TestCodexDescriptorLeakIsBounded(t *testing.T) {
 		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
 		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
 		"REVIEWCTL_FAKE_CODEX_LEAK_READY="+ready,
+		"REVIEWCTL_FAKE_CODEX_LEADER_EXITED="+leaderExited,
 		"REVIEWCTL_FAKE_DESCENDANT_SURVIVED="+heartbeatPath,
 	)
 	if queued := runCLI(t, env, binary, "--json", "review", "https://github.com/acme/service/pull/7"); queued.exitCode != 0 {
@@ -143,6 +154,12 @@ func TestCodexDescriptorLeakIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(-groupID, syscall.SIGKILL) })
+	if cancelDuringWait {
+		waitForPath(t, leaderExited)
+		if err := command.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
+	}
 	err = command.Wait()
 	if ctx.Err() != nil {
 		t.Fatalf("run exceeded the outer bound: %v", ctx.Err())
@@ -159,7 +176,7 @@ func TestCodexDescriptorLeakIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := result["results"].([]any)
-	if len(results) != 1 || results[0].(map[string]any)["error"].(map[string]any)["code"] != "codex_failed" {
+	if len(results) != 1 || results[0].(map[string]any)["error"].(map[string]any)["code"] != wantCode {
 		t.Fatalf("run result = %#v", result)
 	}
 	if _, err := os.Stat(parts[0]); !os.IsNotExist(err) {
@@ -173,7 +190,7 @@ func TestCodexDescriptorLeakIsBounded(t *testing.T) {
 	queue, queueError := store.Snapshot(context.Background())
 	history, historyError := store.History(context.Background())
 	if queueError != nil || historyError != nil || len(queue) != 1 || len(history) != 1 ||
-		history[0].ErrorCode != "codex_failed" || len(history[0].ErrorMessage) > 512 {
+		history[0].ErrorCode != wantCode || len(history[0].ErrorMessage) > 512 {
 		t.Fatalf("queue=%+v queue_err=%v history=%+v history_err=%v", queue, queueError, history, historyError)
 	}
 	heartbeat, err := os.ReadFile(heartbeatPath)
@@ -949,7 +966,15 @@ func TestCodexDescendantProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_REVIEWCTL_DESCENDANT") != "1" {
 		return
 	}
+	leaderPID, _ := strconv.Atoi(os.Getenv("REVIEWCTL_FAKE_CODEX_LEADER_PID"))
+	leaderExited := false
 	for count := 0; ; count++ {
+		if !leaderExited && leaderPID != 0 && os.Getppid() != leaderPID {
+			if err := os.WriteFile(os.Getenv("REVIEWCTL_FAKE_CODEX_LEADER_EXITED"), nil, 0o600); err != nil {
+				os.Exit(78)
+			}
+			leaderExited = true
+		}
 		if os.WriteFile(os.Getenv("REVIEWCTL_FAKE_DESCENDANT_SURVIVED"), []byte(strconv.Itoa(count)), 0o600) != nil {
 			os.Exit(78)
 		}
@@ -1157,7 +1182,8 @@ func helperCodex(args []string) {
 	}
 	if ready := os.Getenv("REVIEWCTL_FAKE_CODEX_LEAK_READY"); ready != "" {
 		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")
-		descendant.Env = append(os.Environ(), "GO_WANT_REVIEWCTL_DESCENDANT=1")
+		descendant.Env = append(os.Environ(), "GO_WANT_REVIEWCTL_DESCENDANT=1",
+			"REVIEWCTL_FAKE_CODEX_LEADER_PID="+strconv.Itoa(os.Getpid()))
 		descendant.Stdout, descendant.Stderr = os.Stdout, os.Stderr
 		if descendant.Start() != nil {
 			os.Exit(73)
