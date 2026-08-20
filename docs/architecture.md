@@ -83,6 +83,7 @@ Configuration lives at `$XDG_CONFIG_HOME/reviewctl/config.yaml`, or `~/.config/r
 ```yaml
 harness: codex
 publish: true
+attempt_timeout: 1h
 
 trusted_authors:
   - alice
@@ -103,6 +104,10 @@ empty list blocks discovery and execution.
 
 Automatic publication requires `publish: true`. This permission is checked before each Codex invocation and is
 included in the trusted instruction. GitHub and Codex credentials remain owned by their CLIs.
+
+`attempt_timeout` bounds one complete review attempt. It defaults to one hour and accepts a positive Go duration up to
+24 hours. Timeout or cancellation terminates the Codex process group, records a stable failure, and leaves the pull
+request queued.
 
 The implementation decodes YAML directly. It does not use a configuration precedence framework.
 

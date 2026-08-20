@@ -7,12 +7,14 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -113,24 +115,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		return result
 	}
 	defer os.RemoveAll(workspace)
-	project := filepath.Join(workspace, "apm-project")
-	if err := os.Mkdir(project, 0o700); err != nil {
-		setAttemptError(&result, fail("workspace_failed", "create APM project: %v", err))
-		return result
-	}
-	if err := os.WriteFile(filepath.Join(project, "apm.yml"), embeddedAPMManifest, 0o600); err != nil {
-		setAttemptError(&result, fail("workspace_failed", "write APM manifest: %v", err))
-		return result
-	}
-	if err := os.WriteFile(filepath.Join(project, "apm.lock.yaml"), embeddedAPMLock, 0o600); err != nil {
-		setAttemptError(&result, fail("workspace_failed", "write APM lock: %v", err))
-		return result
-	}
-	if err := runCommand(ctx, project, nil, "apm", "install", "--frozen", "--root", workspace, "--target", "codex"); err != nil {
-		setAttemptError(&result, fail("apm_failed", "%v", err))
-		return result
-	}
-	digest, err := HashSkills(filepath.Join(workspace, ".agents", "skills"))
+	digest, err := installLockedSkills(ctx, workspace)
 	if err != nil {
 		setAttemptError(&result, fail("apm_failed", "%v", err))
 		return result
@@ -159,7 +144,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("workspace_failed", "write trusted instruction: %v", err))
 		return result
 	}
-	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
+	if err := runCodexCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
 		"--sandbox", "workspace-write", "--approve-for-me", "--color", "never", "--cd", workspace,
 		"--skip-git-repo-check", "-o", receiptPath, "-"); err != nil {
 		setAttemptError(&result, fail("codex_failed", "%v", err))
@@ -191,13 +176,54 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 	return result
 }
 
+func installLockedSkills(ctx context.Context, workspace string) (string, error) {
+	project := filepath.Join(workspace, "apm-project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		return "", fmt.Errorf("create APM project: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "apm.yml"), embeddedAPMManifest, 0o600); err != nil {
+		return "", fmt.Errorf("write APM manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "apm.lock.yaml"), embeddedAPMLock, 0o600); err != nil {
+		return "", fmt.Errorf("write APM lock: %w", err)
+	}
+	if err := runCommand(ctx, project, nil, "apm", "install", "--frozen", "--root", workspace, "--target", "codex"); err != nil {
+		return "", err
+	}
+	digest, err := HashSkills(filepath.Join(workspace, ".agents", "skills"))
+	if err != nil {
+		return "", err
+	}
+	return digest, nil
+}
+
 func runCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
+	return executeCommand(ctx, command, dir, stdin, name)
+}
+
+func runCodexCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
+	command := exec.CommandContext(ctx, name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return executeCommand(ctx, command, dir, stdin, name)
+}
+
+func executeCommand(ctx context.Context, command *exec.Cmd, dir string, stdin io.Reader, name string) error {
 	command.Dir = dir
 	command.Stdin = stdin
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s failed: %w", name, ctx.Err())
+		}
 		return fmt.Errorf("%s failed: %w: %s", name, err, bounded(strings.TrimSpace(output.String()), 512))
 	}
 	return nil

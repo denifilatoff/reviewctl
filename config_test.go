@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLockPathUsesXDGRuntimeDirectory(t *testing.T) {
@@ -86,5 +87,25 @@ repositories:
 `))
 	if err != nil {
 		t.Fatalf("publication policy should be checked before each attempt: %v", err)
+	}
+}
+
+func TestDecodeConfigUsesBoundedAttemptTimeout(t *testing.T) {
+	config := func(timeout string) string {
+		return "harness: codex\npublish: true\ntrusted_authors: [alice]\nrepositories:\n" +
+			"  - provider: github\n    repository: acme/service\n" + timeout
+	}
+	cfg, err := DecodeConfig(strings.NewReader(config("attempt_timeout: 2m\n")))
+	if err != nil || cfg.AttemptTimeout != 2*time.Minute {
+		t.Fatalf("configured timeout = %s, err = %v", cfg.AttemptTimeout, err)
+	}
+	cfg, err = DecodeConfig(strings.NewReader(config("")))
+	if err != nil || cfg.AttemptTimeout != time.Hour {
+		t.Fatalf("default timeout = %s, err = %v", cfg.AttemptTimeout, err)
+	}
+	for _, timeout := range []string{"0s", "-1s", "25h"} {
+		if _, err := DecodeConfig(strings.NewReader(config("attempt_timeout: " + timeout + "\n"))); err == nil {
+			t.Errorf("accepted timeout %s", timeout)
+		}
 	}
 }

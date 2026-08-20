@@ -8,9 +8,50 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestRunLockObservationNeverClaimsConsumerLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.lock")
+	lock, alreadyRunning, err := acquireRunLock(path)
+	if err != nil || alreadyRunning {
+		t.Fatalf("seed lock: already_running=%t err=%v", alreadyRunning, err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var observers sync.WaitGroup
+	for range 8 {
+		observers.Add(1)
+		go func() {
+			defer observers.Done()
+			<-start
+			for range 2_000 {
+				if _, err := observeRunLock(path); err != nil {
+					t.Errorf("observe lock: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	for range 2_000 {
+		lock, alreadyRunning, err := acquireRunLock(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if alreadyRunning {
+			t.Fatal("lock observation made a consumer report already_running")
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observers.Wait()
+}
 
 func TestMainHumanRunPrintsSummary(t *testing.T) {
 	temp := t.TempDir()
@@ -381,7 +422,7 @@ func TestMainHumanStatusShowsEmptyAndBoundedPopulatedState(t *testing.T) {
 	if exit := Main([]string{"status"}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
 		t.Fatalf("empty status exit = %d, stderr = %q", exit, stderr.String())
 	}
-	if want := "queue:\n  (empty)\nhistory:\n  (empty)\n"; stdout.String() != want {
+	if want := "run_active: false\nqueue:\n  (empty)\nhistory:\n  (empty)\n"; stdout.String() != want {
 		t.Fatalf("empty status output = %q, want %q", stdout.String(), want)
 	}
 
@@ -415,7 +456,7 @@ func TestMainHumanStatusShowsEmptyAndBoundedPopulatedState(t *testing.T) {
 	if exit := Main([]string{"status", "--limit", "1"}, &stdout, &stderr); exit != 0 || stderr.String() != "" {
 		t.Fatalf("populated status exit = %d, stderr = %q", exit, stderr.String())
 	}
-	want := "queue:\n  " + queued.URL + "\nhistory:\n  2026-08-20T12:00:00Z " + newer.URL +
+	want := "run_active: false\nqueue:\n  " + queued.URL + "\nhistory:\n  2026-08-20T12:00:00Z " + newer.URL +
 		" failed error=codex_failed: codex failed\n"
 	if stdout.String() != want {
 		t.Fatalf("populated status output = %q, want %q", stdout.String(), want)
