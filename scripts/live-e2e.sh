@@ -64,11 +64,12 @@ count_markers() {
     awk 'NF { count++ } END { print count + 0 }'
 }
 
+before_count=$(count_markers)
 "$binary" --json review "$pr_url" >"$work/enqueue-1.json"
 "$binary" --json run >"$work/run-1.json"
 first_count=$(count_markers)
-if [ "$first_count" -lt 1 ]; then
-  echo "first run did not publish or recover a marked review" >&2
+if [ "$first_count" -ne "$((before_count + 1))" ] || ! grep -q '"recovered":false' "$work/run-1.json"; then
+  echo "first run did not publish exactly one new marked review" >&2
   exit 1
 fi
 if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; then

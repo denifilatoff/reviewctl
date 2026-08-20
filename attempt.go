@@ -1,9 +1,10 @@
-package reviewctl
+package main
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,35 +16,11 @@ import (
 	"time"
 )
 
-const embeddedAPMManifest = `name: reviewctl
-version: 0.1.0
-description: Locked review skill used by reviewctl attempts.
+//go:embed apm.yml
+var embeddedAPMManifest []byte
 
-targets:
-  - codex
-
-dependencies:
-  apm:
-    - Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
-`
-
-const embeddedAPMLock = `lockfile_version: '1'
-generated_at: '2026-08-20T09:14:45.404594+00:00'
-apm_version: 0.28.0
-dependencies:
-- repo_url: netcracker/qubership-ai-packages
-  materialization_repo_url: Netcracker/qubership-ai-packages
-  name: adversarial-code-review
-  host: github.com
-  resolved_commit: f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
-  resolved_ref: f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
-  version: 1.0.0
-  virtual_path: agent-packages/adversarial-code-review
-  is_virtual: true
-  package_type: apm_package
-  content_hash: sha256:27352486db08f0f0062f80ddbf4ec7f30a0fd1fca55a6657c55c7680499a5c47
-deployments: []
-`
+//go:embed apm.lock.yaml
+var embeddedAPMLock []byte
 
 type Receipt struct {
 	Provider    string `json:"provider"`
@@ -131,11 +108,11 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("workspace_failed", "create APM project: %v", err))
 		return result
 	}
-	if err := os.WriteFile(filepath.Join(project, "apm.yml"), []byte(embeddedAPMManifest), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(project, "apm.yml"), embeddedAPMManifest, 0o600); err != nil {
 		setAttemptError(&result, fail("workspace_failed", "write APM manifest: %v", err))
 		return result
 	}
-	if err := os.WriteFile(filepath.Join(project, "apm.lock.yaml"), []byte(embeddedAPMLock), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(project, "apm.lock.yaml"), embeddedAPMLock, 0o600); err != nil {
 		setAttemptError(&result, fail("workspace_failed", "write APM lock: %v", err))
 		return result
 	}
@@ -152,6 +129,11 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 
 	source := filepath.Join(workspace, "source")
 	if err := runCommand(ctx, "", nil, "gh", "repo", "clone", pr.Repository, source, "--", "--no-checkout"); err != nil {
+		setAttemptError(&result, fail("checkout_failed", "%v", err))
+		return result
+	}
+	if err := runCommand(ctx, "", nil, "git", "-C", source, "fetch", "origin",
+		fmt.Sprintf("refs/pull/%d/head", pr.Number)); err != nil {
 		setAttemptError(&result, fail("checkout_failed", "%v", err))
 		return result
 	}

@@ -6,7 +6,7 @@ accepts explicit pull request URLs. It does not discover changes automatically.
 Build the command and run the CI gates from the repository root:
 
 ```shell
-go build -o reviewctl ./cmd/reviewctl
+go build -o reviewctl .
 make ci
 ```
 

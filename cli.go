@@ -1,4 +1,4 @@
-package reviewctl
+package main
 
 import (
 	"context"
@@ -23,7 +23,7 @@ type runItem struct {
 	Status    string       `json:"status"`
 	Verdict   string       `json:"verdict,omitempty"`
 	ReviewURL string       `json:"review_url,omitempty"`
-	Recovered bool         `json:"recovered,omitempty"`
+	Recovered bool         `json:"recovered"`
 	Error     *resultError `json:"error,omitempty"`
 }
 
@@ -142,7 +142,12 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 	if result.Failed > 0 {
 		result.Status, exitCode = "failed", 1
 	}
-	writeResult(stdout, jsonMode, result)
+	if jsonMode {
+		writeResult(stdout, true, result)
+	} else {
+		fmt.Fprintf(stdout, "run: queued=%d attempted=%d succeeded=%d failed=%d\n",
+			result.Queued, result.Attempted, result.Succeeded, result.Failed)
+	}
 	return exitCode
 }
 

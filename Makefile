@@ -1,10 +1,10 @@
 .PHONY: build ci fmt test vet apm-check live-e2e
 
 build:
-	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; go build -o "$$build_dir/reviewctl" ./cmd/reviewctl
+	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; go build -o "$$build_dir/reviewctl" .
 
 fmt:
-	@test -z "$$(gofmt -l cmd internal)"
+	@test -z "$$(gofmt -l *.go)"
 
 test:
 	go test ./...
@@ -20,5 +20,5 @@ ci: fmt vet test build apm-check
 
 live-e2e: build
 	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; \
-		go build -o "$$build_dir/reviewctl" ./cmd/reviewctl; \
+		go build -o "$$build_dir/reviewctl" .; \
 		REVIEWCTL_BIN="$$build_dir/reviewctl" ./scripts/live-e2e.sh

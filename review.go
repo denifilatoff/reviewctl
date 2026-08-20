@@ -1,4 +1,4 @@
-package reviewctl
+package main
 
 import (
 	"fmt"

@@ -1,4 +1,4 @@
-package reviewctl_test
+package main
 
 import (
 	"bytes"
@@ -13,15 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/denifilatoff/reviewctl/internal/reviewctl"
 )
 
 func TestFullProcessReviewAndRunCycle(t *testing.T) {
-	root := filepath.Clean(filepath.Join("..", ".."))
+	root := "."
 	temp := t.TempDir()
 	binary := filepath.Join(temp, "reviewctl")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, output)
@@ -63,6 +61,7 @@ repositories:
 		"XDG_CONFIG_HOME="+configHome,
 		"XDG_STATE_HOME="+stateHome,
 		"REVIEWCTL_FAKE_STATE="+filepath.Join(temp, "published"),
+		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
 	)
 
 	firstURL := "https://github.com/acme/service/pull/7"
@@ -85,6 +84,9 @@ repositories:
 	result = runCLI(t, env, binary, "--json", "run")
 	if result.exitCode != 0 || result.stderr != "" || result.object["status"] != "success" {
 		t.Fatalf("first run result: %+v", result)
+	}
+	if !strings.Contains(result.stdout, `"recovered":false`) {
+		t.Fatalf("first run did not report publication: %+v", result)
 	}
 	if _, err := os.Stat(filepath.Join(temp, "published")); err != nil {
 		t.Fatalf("Codex double did not publish: %v", err)
@@ -109,7 +111,7 @@ repositories:
 		t.Fatalf("failed run result: %+v", result)
 	}
 
-	store, err := reviewctl.OpenStore(filepath.Join(stateHome, "reviewctl", "reviewctl.db"))
+	store, err := OpenStore(filepath.Join(stateHome, "reviewctl", "reviewctl.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +120,17 @@ repositories:
 	history, _ := store.History(context.Background())
 	if len(queue) != 1 || queue[0].Number != 8 || len(history) != 3 || history[2].ErrorCode != "untrusted_author" {
 		t.Fatalf("unexpected durable state: queue=%+v history=%+v", queue, history)
+	}
+
+	result = runCLI(t, env, binary, "--json", "review", firstURL)
+	if result.exitCode != 0 {
+		t.Fatalf("enqueue moving-head fixture: %+v", result)
+	}
+	headChangeEnv := append(append([]string{}, env...),
+		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
+	result = runCLI(t, headChangeEnv, binary, "--json", "run")
+	if result.exitCode != 1 || !strings.Contains(result.stdout, `"code":"head_changed"`) {
+		t.Fatalf("moving head result: %+v", result)
 	}
 }
 
@@ -172,7 +185,7 @@ func TestHelperProcess(t *testing.T) {
 	case "apm":
 		helperAPM(args)
 	case "git":
-		os.Exit(0)
+		helperGit(args)
 	case "codex":
 		helperCodex(args)
 	default:
@@ -181,16 +194,52 @@ func TestHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func helperGit(args []string) {
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	state := os.Getenv("REVIEWCTL_FAKE_GIT_STATE")
+	if len(args) == 5 && args[0] == "-C" && args[2] == "fetch" && args[3] == "origin" &&
+		args[4] == "refs/pull/7/head" {
+		if os.WriteFile(state, []byte(head), 0o600) != nil {
+			os.Exit(96)
+		}
+		return
+	}
+	if len(args) == 5 && args[0] == "-C" && args[2] == "checkout" && args[3] == "--detach" && args[4] == head {
+		fetched, err := os.ReadFile(state)
+		if err != nil || string(fetched) != head {
+			os.Exit(97)
+		}
+		if os.Remove(state) != nil {
+			os.Exit(97)
+		}
+		return
+	}
+	os.Exit(98)
+}
+
 func helperGH(args []string) {
 	if len(args) >= 3 && args[0] == "pr" && args[1] == "view" {
 		number := int64(7)
 		author := "dependabot[bot]"
+		head := "0123456789abcdef0123456789abcdef01234567"
 		if strings.HasSuffix(args[2], "/8") {
 			number, author = 8, "mallory"
 		}
+		if counterPath := os.Getenv("REVIEWCTL_FAKE_HEAD_COUNTER"); counterPath != "" && number == 7 {
+			count := 0
+			if data, err := os.ReadFile(counterPath); err == nil {
+				count, _ = strconv.Atoi(string(data))
+			}
+			if os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600) != nil {
+				os.Exit(99)
+			}
+			if count > 0 {
+				head = "fedcba9876543210fedcba9876543210fedcba98"
+			}
+		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"url": args[2], "number": number, "state": "OPEN", "isDraft": false,
-			"headRefOid": "0123456789abcdef0123456789abcdef01234567", "author": map[string]string{"login": author},
+			"headRefOid": head, "author": map[string]string{"login": author},
 		})
 		return
 	}
@@ -237,7 +286,7 @@ func helperCodex(args []string) {
 	if !recovered {
 		os.WriteFile(state, []byte("123"), 0o600)
 	}
-	receipt := reviewctl.Receipt{
+	receipt := Receipt{
 		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
 		SkillDigest: fields["Skill digest"], Verdict: "APPROVE", ReviewID: "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),

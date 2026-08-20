@@ -1,12 +1,28 @@
-package reviewctl
+package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestEmbeddedAPMFilesMatchCheckedInFiles(t *testing.T) {
+	for name, embedded := range map[string][]byte{
+		"apm.yml":       embeddedAPMManifest,
+		"apm.lock.yaml": embeddedAPMLock,
+	} {
+		checkedIn, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(embedded, checkedIn) {
+			t.Fatalf("embedded %s differs from the checked-in file", name)
+		}
+	}
+}
 
 func TestRunCommandPropagatesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
