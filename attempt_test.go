@@ -200,6 +200,40 @@ func TestValidateReceiptRejectsWrongReviewIdentity(t *testing.T) {
 	}
 }
 
+func TestReadReceiptAcceptsNumericAndQuotedReviewIDs(t *testing.T) {
+	for _, body := range []string{
+		`{"review_id":4985115476}`,
+		`{"review_id":"4985115476"}`,
+	} {
+		path := filepath.Join(t.TempDir(), "receipt.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		receipt, err := readReceipt(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", body, err)
+		}
+		if receipt.ReviewID != "4985115476" {
+			t.Fatalf("review ID = %q", receipt.ReviewID)
+		}
+	}
+}
+
+func TestReadReceiptRejectsUnknownFieldsAndExtraValues(t *testing.T) {
+	for _, body := range []string{
+		`{"review_id":"4985115476","unexpected":true}`,
+		`{"review_id":"4985115476"} {}`,
+	} {
+		path := filepath.Join(t.TempDir(), "receipt.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readReceipt(path); err == nil {
+			t.Fatalf("accepted invalid receipt %s", body)
+		}
+	}
+}
+
 func TestHashSkillsSeparatesFileContentsFromTheNextPath(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()

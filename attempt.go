@@ -25,15 +25,15 @@ var embeddedAPMManifest []byte
 var embeddedAPMLock []byte
 
 type Receipt struct {
-	Provider    string `json:"provider"`
-	Repository  string `json:"repository"`
-	Number      int64  `json:"number"`
-	HeadSHA     string `json:"head_sha"`
-	SkillDigest string `json:"skill_digest"`
-	Verdict     string `json:"verdict"`
-	ReviewID    string `json:"review_id"`
-	ReviewURL   string `json:"review_url"`
-	Recovered   bool   `json:"recovered"`
+	Provider    string      `json:"provider"`
+	Repository  string      `json:"repository"`
+	Number      int64       `json:"number"`
+	HeadSHA     string      `json:"head_sha"`
+	SkillDigest string      `json:"skill_digest"`
+	Verdict     string      `json:"verdict"`
+	ReviewID    json.Number `json:"review_id"`
+	ReviewURL   string      `json:"review_url"`
+	Recovered   bool        `json:"recovered"`
 }
 
 func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string, selfAuthored bool) error {
@@ -48,7 +48,7 @@ func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string,
 		return fmt.Errorf("COMMENT verdict requires a self-authored pull request")
 	}
 	reviewPRURL, reviewID, found := strings.Cut(receipt.ReviewURL, "#pullrequestreview-")
-	if receipt.ReviewID == "" || !found || reviewID != receipt.ReviewID ||
+	if receipt.ReviewID == "" || !found || reviewID != string(receipt.ReviewID) ||
 		!samePullRequestIdentity(reviewPRURL, expected) {
 		return fmt.Errorf("receipt review identity is invalid")
 	}
@@ -170,7 +170,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 	}
 	result.Success = true
 	result.Verdict = receipt.Verdict
-	result.ReviewID = receipt.ReviewID
+	result.ReviewID = string(receipt.ReviewID)
 	result.ReviewURL = receipt.ReviewURL
 	result.Recovered = receipt.Recovered
 	return result
