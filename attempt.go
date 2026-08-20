@@ -47,8 +47,10 @@ func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string,
 	if receipt.Verdict == "COMMENT" && !selfAuthored {
 		return fmt.Errorf("COMMENT verdict requires a self-authored pull request")
 	}
+	receiptReviewID := string(receipt.ReviewID)
 	reviewPRURL, reviewID, found := strings.Cut(receipt.ReviewURL, "#pullrequestreview-")
-	if receipt.ReviewID == "" || !found || reviewID != string(receipt.ReviewID) ||
+	if strings.Trim(receiptReviewID, "0") == "" || strings.Trim(receiptReviewID, "0123456789") != "" ||
+		!found || reviewID != receiptReviewID ||
 		!samePullRequestIdentity(reviewPRURL, expected) {
 		return fmt.Errorf("receipt review identity is invalid")
 	}

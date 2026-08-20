@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -200,7 +201,22 @@ func TestValidateReceiptRejectsWrongReviewIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateReceiptRejectsNonPositiveDecimalReviewIDs(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	for _, reviewID := range []json.Number{"", "0", "00", "-1", "1.5", "1e3", "１２３"} {
+		receipt := Receipt{
+			Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+			Verdict: "APPROVE", ReviewID: reviewID,
+			ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-" + string(reviewID),
+		}
+		if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
+			t.Errorf("accepted review ID %q", reviewID)
+		}
+	}
+}
+
 func TestReadReceiptAcceptsNumericAndQuotedReviewIDs(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	for _, body := range []string{
 		`{"review_id":4985115476}`,
 		`{"review_id":"4985115476"}`,
@@ -216,13 +232,21 @@ func TestReadReceiptAcceptsNumericAndQuotedReviewIDs(t *testing.T) {
 		if receipt.ReviewID != "4985115476" {
 			t.Fatalf("review ID = %q", receipt.ReviewID)
 		}
+		receipt.Provider, receipt.Repository, receipt.Number = "github", "acme/service", 7
+		receipt.HeadSHA, receipt.SkillDigest, receipt.Verdict = "head", "digest", "APPROVE"
+		receipt.ReviewURL = "https://github.com/acme/service/pull/7#pullrequestreview-4985115476"
+		if err := ValidateReceipt(receipt, pr, "head", "digest", false); err != nil {
+			t.Fatalf("validate %s: %v", body, err)
+		}
 	}
 }
 
-func TestReadReceiptRejectsUnknownFieldsAndExtraValues(t *testing.T) {
+func TestReadReceiptRejectsInvalidInput(t *testing.T) {
 	for _, body := range []string{
 		`{"review_id":"4985115476","unexpected":true}`,
 		`{"review_id":"4985115476"} {}`,
+		`{"review_id":""}`,
+		`{"review_id":"not-a-number"}`,
 	} {
 		path := filepath.Join(t.TempDir(), "receipt.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
