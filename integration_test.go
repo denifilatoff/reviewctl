@@ -79,11 +79,15 @@ func TestRunLockKeepsOtherCommandsAvailable(t *testing.T) {
 }
 
 func TestAttemptTimeoutKillsCodexDescendantAndRetainsQueue(t *testing.T) {
-	testInterruptedAttempt(t, 10*time.Second, false, "attempt_timeout")
+	testInterruptedAttempt(t, 10*time.Second, false, false, "attempt_timeout")
+}
+
+func TestAttemptTimeoutBoundsPreCodexDescendant(t *testing.T) {
+	testInterruptedAttempt(t, 10*time.Second, false, true, "apm_failed")
 }
 
 func TestCancellationKillsCodexDescendantAndRetainsQueue(t *testing.T) {
-	testInterruptedAttempt(t, 30*time.Second, true, "attempt_canceled")
+	testInterruptedAttempt(t, 30*time.Second, true, false, "attempt_canceled")
 }
 
 func TestCodexDescriptorLeakIsBounded(t *testing.T) {
@@ -203,7 +207,7 @@ func testCodexDescriptorLeak(t *testing.T, cancelDuringWait bool, wantCode strin
 	}
 }
 
-func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool, wantCode string) {
+func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun, preCodex bool, wantCode string) {
 	t.Helper()
 	temp := t.TempDir()
 	binary := filepath.Join(temp, "reviewctl")
@@ -222,6 +226,10 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 	}
 	ready := filepath.Join(temp, "codex-ready")
 	survived := filepath.Join(temp, "descendant-survived")
+	readyEnvironment := "REVIEWCTL_FAKE_CODEX_READY=" + ready
+	if preCodex {
+		readyEnvironment = "REVIEWCTL_FAKE_APM_READY=" + ready
+	}
 	env := append(os.Environ(),
 		"GO_WANT_REVIEWCTL_HELPER=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -229,28 +237,52 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
 		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
 		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
-		"REVIEWCTL_FAKE_CODEX_READY="+ready,
+		readyEnvironment,
 		"REVIEWCTL_FAKE_DESCENDANT_SURVIVED="+survived,
 	)
 	queued := runCLI(t, env, binary, "--json", "review", "https://github.com/acme/service/pull/7")
 	if queued.exitCode != 0 {
 		t.Fatalf("enqueue = %+v", queued)
 	}
-	command := exec.Command(binary, "--json", "run")
+	outerContext, cancelOuter := context.WithTimeout(context.Background(), timeout+5*time.Second)
+	defer cancelOuter()
+	command := exec.CommandContext(outerContext, binary, "--json", "run")
 	command.Env = env
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
+	started := time.Now()
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
 	waitForPath(t, ready)
 	waitForPath(t, survived)
+	workspaceData, err := os.ReadFile(ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyParts := strings.Split(strings.TrimSpace(string(workspaceData)), "\n")
+	if readyParts[0] == "" || len(readyParts) > 2 {
+		t.Fatalf("ready data = %q", workspaceData)
+	}
+	if len(readyParts) == 2 {
+		descendantPID, err := strconv.Atoi(readyParts[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = syscall.Kill(descendantPID, syscall.SIGKILL) })
+	}
 	if cancelRun {
 		if err := command.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := command.Wait()
+	err = command.Wait()
+	if outerContext.Err() != nil {
+		t.Fatalf("run exceeded the outer bound: %v", outerContext.Err())
+	}
+	if elapsed := time.Since(started); elapsed >= timeout+4*time.Second {
+		t.Fatalf("run was not bounded: %s", elapsed)
+	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || stderr.String() != "" {
 		t.Fatalf("run err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
@@ -263,11 +295,7 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 	if len(results) != 1 || results[0].(map[string]any)["error"].(map[string]any)["code"] != wantCode {
 		t.Fatalf("run result = %#v", result)
 	}
-	workspaceData, err := os.ReadFile(ready)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(strings.TrimSpace(string(workspaceData))); !os.IsNotExist(err) {
+	if _, err := os.Stat(readyParts[0]); !os.IsNotExist(err) {
 		t.Fatalf("attempt workspace was not removed: %v", err)
 	}
 	store, err := OpenStore(filepath.Join(temp, "state", "reviewctl", "reviewctl.db"))
@@ -275,7 +303,7 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 		t.Fatal(err)
 	}
 	defer store.Close()
-	queue, history, _ := store.Status(context.Background(), 1)
+	queue, history, _ := store.Status(context.Background(), 2)
 	if len(queue) != 1 || len(history) != 1 || history[0].ErrorCode != wantCode || len(history[0].ErrorMessage) > 512 {
 		t.Fatalf("queue=%+v history=%+v", queue, history)
 	}
@@ -286,7 +314,8 @@ func testInterruptedAttempt(t *testing.T, timeout time.Duration, cancelRun bool,
 	time.Sleep(300 * time.Millisecond)
 	after, err := os.ReadFile(survived)
 	if err != nil || !bytes.Equal(heartbeat, after) {
-		t.Fatalf("Codex descendant survived process-group termination: before=%q after=%q err=%v", heartbeat, after, err)
+		t.Fatalf("external command descendant survived process-group termination: before=%q after=%q err=%v",
+			heartbeat, after, err)
 	}
 }
 
@@ -1260,16 +1289,30 @@ func helperAPM(args []string) {
 		fmt.Fprintln(os.Stderr, "scripted APM failure")
 		os.Exit(75)
 	}
+	root := ""
 	for i := range args {
 		if args[i] == "--root" && i+1 < len(args) {
-			dir := filepath.Join(args[i+1], ".agents", "skills", "adversarial-code-review")
-			if os.MkdirAll(dir, 0o700) != nil || os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("review"), 0o600) != nil {
-				os.Exit(93)
-			}
-			return
+			root = args[i+1]
+			break
 		}
 	}
-	os.Exit(94)
+	if root == "" {
+		os.Exit(94)
+	}
+	if ready := os.Getenv("REVIEWCTL_FAKE_APM_READY"); ready != "" {
+		descendant := exec.Command(os.Args[0], "-test.run=TestCodexDescendantProcess")
+		descendant.Env = append(os.Environ(), "GO_WANT_REVIEWCTL_DESCENDANT=1")
+		descendant.Stdout, descendant.Stderr = os.Stdout, os.Stderr
+		if descendant.Start() != nil ||
+			os.WriteFile(ready, []byte(root+"\n"+strconv.Itoa(descendant.Process.Pid)), 0o600) != nil {
+			os.Exit(93)
+		}
+		return
+	}
+	dir := filepath.Join(root, ".agents", "skills", "adversarial-code-review")
+	if os.MkdirAll(dir, 0o700) != nil || os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("review"), 0o600) != nil {
+		os.Exit(93)
+	}
 }
 
 func helperCodex(args []string) {

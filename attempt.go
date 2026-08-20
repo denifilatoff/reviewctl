@@ -144,7 +144,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("workspace_failed", "write trusted instruction: %v", err))
 		return result
 	}
-	if err := runCodexCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
+	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex", "exec", "--ephemeral",
 		"--sandbox", "workspace-write", "--approve-for-me", "--color", "never", "--cd", workspace,
 		"--skip-git-repo-check", "-o", receiptPath, "-"); err != nil {
 		setAttemptError(&result, fail("codex_failed", "%v", err))
@@ -198,11 +198,6 @@ func installLockedSkills(ctx context.Context, workspace string) (string, error) 
 }
 
 func runCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
-	command := exec.CommandContext(ctx, name, args...)
-	return executeCommand(ctx, command, dir, stdin, name)
-}
-
-func runCodexCommand(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error { return killProcessGroup(command.Process.Pid) }
