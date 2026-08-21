@@ -1,0 +1,198 @@
+name: Release
+run-name: ${{ github.repository }} Release ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build and release, e.g. v0.1.0
+        required: true
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate release
+        run: |
+          set -euo pipefail
+          test "${{ github.ref_name }}" = main
+          printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          tag_target=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$VERSION" \
+            --jq ".[] | select(.ref == \"refs/tags/$VERSION\") | .object.sha")
+          if [ -n "$tag_target" ] && [ "$tag_target" != "$GITHUB_SHA" ]; then
+            echo "tag $VERSION does not point to $GITHUB_SHA" >&2
+            exit 1
+          fi
+          release_drafts=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$VERSION\") | .draft")
+          case "$release_drafts" in
+            "") ;;
+            true)
+              test "$tag_target" = "$GITHUB_SHA" || {
+                echo "draft release $VERSION does not have the expected tag" >&2
+                exit 1
+              }
+              ;;
+            false)
+              echo "published release already exists: $VERSION" >&2
+              exit 1
+              ;;
+            *)
+              echo "multiple releases use tag $VERSION" >&2
+              exit 1
+              ;;
+          esac
+
+  checks:
+    needs: preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        run: go test -race ./...
+      - name: Installer test
+        run: sh scripts/install_test.sh
+      - name: Shell syntax
+        run: sh -n scripts/install.sh scripts/install_test.sh
+
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "dist/reviewctl-${GOOS}-${GOARCH}" .
+      - name: Verify linked version
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: test "$(./dist/reviewctl-linux-amd64 --version)" = "$VERSION"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reviewctl-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Stage and verify release payload
+        run: |
+          cp scripts/install.sh dist/install.sh
+          (cd dist && sha256sum reviewctl-* > SHA256SUMS)
+          printf '%s\n' SHA256SUMS install.sh reviewctl-darwin-amd64 reviewctl-darwin-arm64 \
+            reviewctl-linux-amd64 reviewctl-linux-arm64 | sort > expected-assets
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort > actual-assets
+          diff -u expected-assets actual-assets
+          (cd dist && awk '{print $2}' SHA256SUMS | sort) > checksum-assets
+          printf '%s\n' reviewctl-darwin-amd64 reviewctl-darwin-arm64 reviewctl-linux-amd64 \
+            reviewctl-linux-arm64 | sort | diff -u - checksum-assets
+      - name: Create and publish verified release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_target=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$VERSION" \
+            --jq ".[] | select(.ref == \"refs/tags/$VERSION\") | .object.sha")
+          if [ -z "$tag_target" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$VERSION" -f "sha=$GITHUB_SHA"
+          else
+            test "$tag_target" = "$GITHUB_SHA"
+          fi
+          tag_target=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$VERSION" \
+            --jq ".[] | select(.ref == \"refs/tags/$VERSION\") | .object.sha")
+          test "$tag_target" = "$GITHUB_SHA"
+          release_drafts=$(gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$VERSION\") | .draft")
+          case "$release_drafts" in
+            "") gh release create "$VERSION" --draft --verify-tag --generate-notes ;;
+            true) ;;
+            false)
+              echo "published release already exists: $VERSION" >&2
+              exit 1
+              ;;
+            *)
+              echo "multiple releases use tag $VERSION" >&2
+              exit 1
+              ;;
+          esac
+          test "$(gh release view "$VERSION" --json isDraft --jq '.isDraft')" = true
+          gh release upload "$VERSION" \
+            dist/reviewctl-darwin-amd64 dist/reviewctl-darwin-arm64 dist/reviewctl-linux-amd64 \
+            dist/reviewctl-linux-arm64 dist/SHA256SUMS dist/install.sh --clobber
+          gh release view "$VERSION" --json assets --jq '.assets[].name' | sort > release-assets
+          printf '%s\n' SHA256SUMS install.sh reviewctl-darwin-amd64 reviewctl-darwin-arm64 \
+            reviewctl-linux-amd64 reviewctl-linux-arm64 | sort | diff -u - release-assets
+          tag_target=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$VERSION" \
+            --jq ".[] | select(.ref == \"refs/tags/$VERSION\") | .object.sha")
+          test "$tag_target" = "$GITHUB_SHA"
+          test "$(gh release view "$VERSION" --json isDraft --jq '.isDraft')" = true
+          gh release edit "$VERSION" --draft=false
+          test "$(gh release view "$VERSION" --json isDraft --jq '.isDraft')" = false
+          test "$(gh release view "$VERSION" --json tagName --jq '.tagName')" = "$VERSION"
+          tag_target=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$VERSION" \
+            --jq ".[] | select(.ref == \"refs/tags/$VERSION\") | .object.sha")
+          test "$tag_target" = "$GITHUB_SHA"
+          gh release view "$VERSION" --json assets --jq '.assets[].name' | sort > release-assets
+          printf '%s\n' SHA256SUMS install.sh reviewctl-darwin-amd64 reviewctl-darwin-arm64 \
+            reviewctl-linux-amd64 reviewctl-linux-arm64 | sort | diff -u - release-assets

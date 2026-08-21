@@ -13,6 +13,19 @@ import (
 	"time"
 )
 
+func TestMainVersionUsesBuildValue(t *testing.T) {
+	previous := Version
+	Version = "v9.8.7"
+	t.Cleanup(func() { Version = previous })
+	var stdout, stderr bytes.Buffer
+	if exit := Main([]string{"--version"}, &stdout, &stderr); exit != 0 {
+		t.Fatalf("exit = %d", exit)
+	}
+	if stdout.String() != "v9.8.7\n" || stderr.String() != "" {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunLockObservationNeverClaimsConsumerLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "run.lock")
 	lock, alreadyRunning, err := acquireRunLock(path)

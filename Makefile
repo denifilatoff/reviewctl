@@ -8,6 +8,7 @@ fmt:
 
 test:
 	go test ./...
+	sh scripts/install_test.sh
 
 vet:
 	go vet ./...

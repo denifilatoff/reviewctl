@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const Version = "0.1.0"
+var Version = "dev"
 
 type resultError struct {
 	Code    string `json:"code"`
