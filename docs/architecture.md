@@ -6,94 +6,88 @@ Last updated: 2026-08-20
 
 ## Purpose
 
-`reviewctl` is a local scheduler for agent-driven pull request reviews. It watches a configured set of repositories,
-starts a coding-agent harness for eligible pull requests, and records the result on the user's machine.
+`reviewctl` schedules Codex reviews of GitHub pull requests on one trusted laptop. It polls configured repositories,
+keeps a local queue, invokes Codex, and records the result in SQLite.
 
-The tool runs from the user's laptop with the user's existing Codex subscription and GitHub CLI credentials. It does
-not require a GitHub App, GitHub Actions workflow, hosted service, or API billing integration.
+The tool uses the user's Codex subscription and GitHub CLI credentials. It does not require a hosted service, webhook,
+GitHub App, GitHub Actions workflow, or separate API billing.
 
-## MVP goals
+## Design constraints
 
-- Detect new pull requests and new head revisions in configured GitHub repositories.
-- Run an explicit list of existing pull requests on demand.
-- Invoke Codex with a trusted review skill and a job-specific instruction.
-- Let the review agent inspect the pull request, run relevant checks, and publish the review when authorized.
-- Prevent duplicate work across retries and concurrent `reviewctl` processes.
-- Keep configuration, state, workspaces, and logs on the local machine.
-- Leave narrow code seams for additional harnesses and code-hosting providers.
+- One `reviewctl run` process may execute work at a time.
+- Other CLI processes may add pull requests or read status while `run` is active.
+- GitHub is the only provider in the MVP.
+- Codex is the only harness in the MVP.
+- Pull request authors must appear in an explicit trust list before Codex may inspect or run their code.
+- The implementation favors operating-system and SQLite behavior over custom coordination code.
 
-## MVP non-goals
+The MVP leaves two source-level extension boundaries: one for another provider, such as GitLab, and one for another
+harness. It does not implement either extension or a plugin system.
 
-- A hosted control plane, webhook receiver, GitHub App, or GitHub Action.
-- Runtime harness plugins or provider plugins.
-- A GitLab implementation.
-- A harness other than Codex.
-- Safe execution of code from untrusted pull request authors.
-- A service installer for `launchd`, `systemd`, cron, or Windows services.
-- File or standard-input submission of pull request lists.
-- A TUI or web interface.
-- APM as a runtime dependency.
+## Process model
 
-## System view
+`reviewctl` is a stateless CLI. Durable state lives in SQLite. An operating-system scheduler invokes `reviewctl run`
+at a fixed interval.
+
+On macOS, `launchd` owns the schedule and process restart behavior:
+
+```text
+launchd
+   |
+   | every configured interval
+   v
+reviewctl run
+   |
+   +-- discover GitHub changes
+   +-- add pull requests to SQLite
+   +-- process one queue snapshot
+   +-- exit
+```
+
+`run` takes one process lock for its entire lifetime. A second `run` reports `already running` and exits without
+changing state. Producer and reader commands do not take this lock.
+
+The lock prevents two consumers from executing the same queue. It does not protect SQLite. SQLite transactions
+coordinate concurrent queue inserts, history writes, and status reads.
+
+`reviewctl` does not hold a SQLite transaction while it calls GitHub, installs skills, or runs Codex.
+
+## Components
 
 ```mermaid
 flowchart LR
-    Config["Local config"] --> Core["reviewctl core"]
-    Core <--> State["SQLite state"]
-    Core --> Provider["GitHub provider"]
-    Provider --> GH["GitHub through gh"]
-    Core --> Workspace["Isolated job workspace"]
-    Core --> Harness["Codex harness adapter"]
-    Workspace --> Harness
-    Harness --> Agent["Codex and review skill"]
-    Agent --> GH
-    Agent --> Receipt["Structured receipt"]
-    Receipt --> Core
-    Core --> Provider
+    Timer["launchd timer"] --> Run["reviewctl run"]
+    User["User or agent"] --> CLI["review / bulk-review / status"]
+    Run <--> DB["SQLite"]
+    CLI <--> DB
+    Run --> GH["GitHub through gh"]
+    Run --> APM["APM"]
+    Run --> Codex["Codex"]
+    Codex --> GH
 ```
 
-`reviewctl` is a thin dispatcher. Deterministic code owns discovery, state, trust checks, concurrency, workspace
-lifecycle, harness invocation, and result verification. The agent and review skill own the semantic review workflow,
-including GitHub reads, source inspection, optional test execution, review composition, and publication.
-
-## Responsibility boundaries
-
-| Component | Owns | Does not own |
-| --- | --- | --- |
-| Core | Configuration, polling, jobs, leases, concurrency, retries, and cleanup | Review judgment or provider syntax |
-| Provider | Discovery, heads, authors, and receipt verification | Review judgment and harness execution |
-| Harness adapter | Checks, command, skill placement, and receipt decoding | Scheduling and provider policy |
-| Agent and skill | Analysis, checks, findings, verdict, and publication | Scheduling, trust policy, and state |
-| SQLite store | Durable metadata, attempts, receipts, and leases | Repository contents, diffs, or credentials |
-| Job workspace | Trusted inputs, skill snapshot, checkout, and transient outputs | Durable scheduling state |
+| Component | Responsibility |
+| --- | --- |
+| CLI | Parse commands, validate local input, and perform short SQLite operations |
+| Run cycle | Discover changes and process one queue snapshot sequentially |
+| GitHub code | Resolve repositories, pull requests, authors, and current heads through `gh` |
+| Codex code | Start and cancel Codex, then decode its receipt |
+| APM | Install the locked review skills into a fresh attempt workspace |
+| SQLite | Store discovery baselines, the pending pull request set, and review history |
 
 ## Configuration
 
-The user or an agent creates the initial configuration at:
-
-```text
-$XDG_CONFIG_HOME/reviewctl/config.yaml
-```
-
-If `XDG_CONFIG_HOME` is unset, the path is `~/.config/reviewctl/config.yaml`.
-
-A conceptual MVP configuration is:
+Configuration lives at `$XDG_CONFIG_HOME/reviewctl/config.yaml`, or `~/.config/reviewctl/config.yaml` when
+`XDG_CONFIG_HOME` is unset.
 
 ```yaml
 harness: codex
-
-skill:
-  name: adversarial-code-review
-  directory: ~/.config/reviewctl/skills
+publish: true
+attempt_timeout: 1h
 
 trusted_authors:
   - alice
-  - bob
   - dependabot[bot]
-
-poll_interval: 5m
-parallel: 1
-publish: true
 
 repositories:
   - provider: github
@@ -102,258 +96,268 @@ repositories:
     repository: acme/service-b
 ```
 
-The following rules apply:
+The MVP accepts only `github` and `codex`. The names keep the two agreed extension boundaries visible without adding
+runtime registries, capability negotiation, or plugin loading.
 
-- `trusted_authors` is required and must contain at least one GitHub login.
-- Logins are normalized to lowercase before exact comparison.
-- A missing or empty trust list makes `doctor`, `run`, and `review` fail closed.
-- `repositories` is required and must contain at least one repository.
-- `github` is the only accepted provider in the MVP.
-- `codex` is the only accepted harness in the MVP.
-- `parallel` defaults to `1`. A command-line flag may set a different bounded value for one invocation.
-- Automatic mode requires an explicit `publish: true` in the configuration. `run` fails closed when it is absent or
-  false.
-- Manual publication requires the explicit `--publish` flag.
+`trusted_authors` must contain at least one exact GitHub login. Comparison is case-insensitive after normalization. An
+empty list blocks discovery and execution.
 
-The implementation parses YAML directly. It does not use Viper or another configuration-precedence framework.
+Automatic publication requires `publish: true`. This permission is checked before each Codex invocation and is
+included in the trusted instruction. GitHub and Codex credentials remain owned by their CLIs.
 
-## Trust model
+`attempt_timeout` bounds one complete review attempt. It defaults to one hour and accepts a positive Go duration up to
+24 hours. Timeout or cancellation terminates the Codex process group, records a stable failure, and leaves the pull
+request queued.
 
-The MVP treats pull requests from configured authors as trusted code.
+The implementation decodes YAML directly. It does not use a configuration precedence framework.
 
-Before creating a job, the GitHub provider reads the pull request author's GitHub login and checks it against
-`trusted_authors`. It repeats the check immediately before starting Codex.
+## Discovery baseline
 
-For an untrusted author, `reviewctl` does not clone the source, start Codex, run code, or publish a review. This rule
-applies to both automatic discovery and explicit `reviewctl review` commands. The MVP has no bypass flag.
+The baseline records the last observed state of each open pull request in each configured repository. It is not a job
+queue or execution history.
 
-Trusted jobs may run repository tests, builds, and scripts when the review skill considers them useful. The generated
-job instruction remains authoritative for the selected repository, pull request, expected head revision, and
-publication permission. Repository instructions may guide build and review behavior, but they cannot broaden that
-scope.
+The first successful poll of a repository establishes its baseline:
 
-This is a practical trust policy, not proof of commit provenance. A trusted pull request author does not prove who
-created every commit or who can update the head branch. The MVP accepts this limitation. A future hardening phase may
-add static-only review, restricted GitHub credentials, commit provenance checks, or a constrained GitHub command
-proxy.
+- Existing ready pull requests are recorded without being queued.
+- Existing drafts are recorded so a later ready transition can be detected.
 
-## Automatic discovery
+Later polls enqueue a pull request when:
 
-`reviewctl run` polls each configured repository through its provider adapter. It is a foreground process. The user
-may supervise it directly or start it with an operating-system service manager.
+- a new pull request is ready for review;
+- a draft becomes ready; or
+- the head SHA of an eligible pull request changes.
 
-Discovery considers every open pull request, regardless of requested reviewers. Bot accounts are ordinary authors
-and must appear in `trusted_authors`.
+The fetched GitHub snapshot is obtained outside a database transaction. Queue inserts and the corresponding baseline
+update use one short SQLite transaction, so a crash cannot advance the baseline without recording the work.
 
-Each repository receives an independent baseline when it first appears in the configuration:
+Discovery requests a 1,001-item sentinel through `gh`. A repository with more than 1,000 open pull requests fails
+discovery without changing its baseline or queue; supporting that repository requires pagination.
 
-- Existing ready pull requests are recorded without starting reviews.
-- Existing draft pull requests are recorded so a later ready transition can trigger a review.
-- Pull requests created after the baseline are eligible.
+A skill or trust-list change does not enqueue every open pull request. The user may enqueue selected pull requests
+explicitly.
 
-After the baseline, the following events create work:
+## Review queue
 
-- A new pull request becomes ready for review.
-- A draft pull request becomes ready for review.
-- The head SHA of an eligible pull request changes.
+The queue is the durable set of pull requests that still need a review. A queue entry identifies only the pull
+request:
 
-A skill update or trust-list update alone does not enqueue every open pull request again. The user can explicitly
-review selected pull requests after either change.
+```text
+provider + repository + provider-local change number
+```
 
-`reviewctl run --once` performs one discovery and processing cycle and then exits. This supports cron-like execution
-without adding a daemon mode.
+The MVP uses `github` and a pull request number. The provider field allows a later GitLab implementation to use a merge
+request IID without changing the queue model.
 
-## Explicit review
+The queue does not store leases, owners, worker generations, retry deadlines, job states, skill digests, receipts, or
+workspace paths. Duplicate events use `INSERT OR IGNORE` against the pull request identity.
 
-`reviewctl review` accepts one or more pull request URLs as positional arguments:
+The service resolves the current head SHA when it starts a review. If the head changes while a pull request waits, only
+the latest revision needs review.
+
+One `run` invocation reads a queue snapshot and processes every entry in that snapshot at most once, in deterministic
+insertion order. Entries added after the snapshot wait for the next invocation.
+
+On confirmed success, `run` records history and deletes the pull request from the queue in one transaction. On failure,
+it records the error and leaves the pull request queued. The operating-system schedule supplies the retry cadence; the
+MVP has no retry loop, backoff policy, or retry counter.
+
+This model provides crash recovery without a running state. A pull request remains queued until success. If Codex
+publishes a review and the process exits before deleting the entry, the next run recovers the existing review through
+its marker and readback instead of publishing a duplicate.
+
+## History
+
+Review history is separate from the queue and never controls scheduling. Each processing attempt records a bounded row
+with:
+
+- pull request identity and reviewed head SHA;
+- start and finish times;
+- success or failure;
+- review verdict when available;
+- published review identifier and URL when available; and
+- a bounded error code and message on failure.
+
+The MVP does not copy the complete published review body into SQLite because GitHub already stores it. The history
+schema may add the body later if local, unpublished reviews need durable retrieval.
+
+History is append-only for normal operation. Retention and telemetry export are outside the MVP.
+
+## Producer commands
+
+Producer commands add work and exit after SQLite confirms the transaction:
+
+```text
+reviewctl review <pull-request-url>
+reviewctl bulk-review <pull-request-url>...
+```
+
+`review` accepts exactly one pull request. Automatic discovery calls the same enqueue application function; it does
+not start a nested CLI process.
+
+`bulk-review` is a manual convenience for a user or agent. It validates the list, adds the pull requests in one short
+transaction, and reports which entries were added or already present. It does not execute Codex or create a separate
+batch scheduler.
+
+Both commands may run while `run` is active. SQLite may briefly wait for another SQLite transaction, but neither
+command waits for a review to finish.
+
+## Run cycle
+
+`reviewctl run` performs one cycle and exits:
+
+1. Acquire the process lock.
+2. Load and validate configuration.
+3. Poll configured GitHub repositories and update the baseline and queue.
+4. Read one deterministic snapshot of the queue.
+5. Process each snapshot entry once, sequentially.
+6. Release the process lock and exit.
+
+Parallel Codex sessions are outside the MVP. If sequential execution becomes too slow, one `run` process may later
+divide its snapshot among a bounded in-memory worker pool. The queue schema does not need leases or worker ownership
+for that change.
+
+## Review attempt
+
+One attempt is one Codex execution for one queued pull request. The attempt resolves and pins these values before Codex
+starts:
+
+```text
+provider + repository + pull request number + head SHA + installed skill digest
+```
+
+The execution path is linear:
+
+1. Resolve the configured pull request and current head through `gh`.
+2. Verify that the repository is configured and the exact author login is trusted.
+3. Create a fresh temporary workspace.
+4. Install and hash the locked skill set with APM.
+5. Write one trusted instruction.
+6. Run Codex. The instruction requires Codex to check the marker, publish when needed, and read the review back.
+7. Validate the receipt and current head.
+8. Remove the entire workspace.
+9. Record history, then remove the queue entry only after confirmed success.
+
+`APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
+valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
+These outcomes are not process failures.
+
+If the head changes before or during the attempt, the attempt does not publish for the old head. The queue entry stays
+in place, and the next run resolves the new head.
+
+## Trust and publication
+
+Only pull requests from configured authors are eligible. `reviewctl` checks the exact normalized GitHub login before
+Codex starts. An untrusted pull request is never cloned, executed, or published. The MVP has no bypass flag.
+
+The trusted instruction limits Codex to one repository, pull request, expected head SHA, installed skill set, and
+publication policy. Repository instructions may guide review and test commands, but they cannot broaden that scope.
+
+Codex and the installed review skill own review analysis and GitHub publication. `reviewctl` does not compose inline
+comments or call the GitHub Review API itself.
+
+Before publication, Codex must check the current head and the exact idempotency marker. If the marker already exists,
+Codex reads that review instead of publishing again. After publication, Codex reads the new review back. In both cases,
+it returns a short receipt containing the actual submitted or recovered review event, head SHA, review identifier, and
+review URL. A GitHub `COMMENTED` event maps to receipt verdict `COMMENT`, even when the review body recommends changes.
+
+`reviewctl` validates the receipt and checks the final head through `gh`. It does not implement marker lookup, review
+composition, publication, or review readback. A valid receipt for a recovered marker is a successful result.
+
+Before Codex, `reviewctl` resolves the authenticated GitHub login directly through `gh`. A self-authored pull request
+requires a `COMMENT` receipt. Other pull requests require `APPROVE` or `REQUEST_CHANGES`; receipt data cannot establish
+reviewer identity.
+
+The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
+running as that user or prove who authored every commit in a trusted pull request.
+
+## Skills and APM
+
+The source checkout contains one `apm.yml` and one `apm.lock.yaml`. The manifest may list several skills required for
+review. The lockfile pins their exact versions.
+
+Each attempt runs:
 
 ```shell
-reviewctl review \
-  https://github.com/acme/service-a/pull/42 \
-  https://github.com/acme/service-b/pull/17 \
-  --publish \
-  --parallel 2 \
-  --output json
+apm install --frozen --root <attempt-workspace> --target codex
 ```
 
-The command resolves each current head SHA, applies the trusted-author policy, creates missing jobs, processes them,
-and waits for completion. A single command can therefore process a list of 10 to 50 existing pull requests without a
-separate batch abstraction.
+`reviewctl` hashes the installed skill set once and includes the digest in the instruction, marker, receipt validation,
+and history. An APM failure stops the attempt before Codex starts and is recorded in history.
 
-The same durable job store and leases are shared with `reviewctl run`. If the command is interrupted, running it again
-resumes or skips work according to the persisted state.
+`reviewctl` does not implement skill lookup, copying, snapshot recovery, or configuration precedence. Updating review
+skills means updating the checked-in APM lockfile.
 
-Without `--publish`, the agent does not change GitHub. The command returns the complete local review result.
+## Workspace
 
-## Job identity and lifecycle
+Each attempt uses a new temporary directory. The workspace contains the APM installation, trusted instruction, receipt
+path, and source checkout. The implementation uses ordinary temporary-directory creation and recursive removal.
 
-A review attempt is identified by:
+The workspace is deleted after success or failure. A later retry creates a new workspace. SQLite retains only bounded
+history, not source files, diffs, or complete process output.
 
-```text
-provider + repository + provider-local change number + head SHA + skill digest + publication intent
-```
+The MVP does not recover, reuse, fence, reference-count, or selectively clean workspaces. It does not implement custom
+filesystem capabilities or defend against the trusted local user replacing files during execution.
 
-The skill digest is part of the attempt identity, but not an automatic discovery trigger. This distinction allows an
-explicit command to run a revised skill against the same head without causing an automatic review storm after every
-skill update. Publication intent distinguishes a local review from a review that may write to the provider. Running a
-local review never prevents a later `--publish` invocation for the same revision.
+## Provider and harness boundaries
 
-Jobs use these states:
+GitHub-specific calls live together, and Codex-specific process handling lives together. Application code calls these
+two narrow boundaries without a runtime plugin registry.
 
-```text
-queued -> running -> succeeded
-                  -> failed
-                  -> stale
-```
-
-`APPROVE` and `REQUEST_CHANGES` are successful review outcomes. They are not process failures.
-
-Each running job holds a renewable SQLite lease. Another `reviewctl` process may inspect the job but cannot execute it
-while the lease is valid. After a process crash or lease expiration, the job becomes eligible for a bounded retry.
-
-Transient harness and provider failures use bounded retries with backoff. Invalid configuration, missing credentials,
-untrusted authors, and unsupported harness or provider names fail without retry.
-
-## Job workspace
-
-`reviewctl` creates and owns one workspace per job:
-
-```text
-<cache>/reviewctl/jobs/<job-id>/
-├── .agents/
-│   └── skills/
-│       └── adversarial-code-review/
-├── instruction.md
-├── job.json
-├── receipt.schema.json
-└── source/
-```
-
-The workspace contains a snapshot of the trusted skill, not a skill supplied by the pull request branch. `reviewctl`
-computes the snapshot digest before starting the harness and records it with the job.
-
-The agent may use `gh` and `git` inside `source/` to obtain and inspect the exact pull request revision. `reviewctl`
-removes the source checkout after the job reaches a terminal state. It retains bounded diagnostic logs, job metadata,
-and the structured receipt. SQLite does not store source files or complete diffs.
-
-## Agent instruction and receipt
-
-Every invocation receives a generated, trusted instruction containing at least:
-
-- Provider and repository.
-- Pull request number and canonical URL.
-- Expected head SHA.
-- Job identifier and skill digest.
-- Whether publication is allowed.
-- The required review skill name.
-- The required receipt schema.
-
-Before publication, the agent must:
-
-1. Read the current head SHA again.
-2. Stop without publishing if the SHA differs from the expected value.
-3. Check for an existing `reviewctl` marker for the same attempt.
-4. Publish a review anchored to the expected revision.
-5. Read the published review back from GitHub.
-6. Return its identifier and URL in the receipt.
-
-Published reviews include a hidden idempotency marker:
-
-```html
-<!-- reviewctl job=<job-id> head=<sha> skill=<digest> -->
-```
-
-The provider adapter verifies the receipt after Codex exits. If the head changed, the current job becomes `stale`, and
-normal discovery can enqueue the new revision. A retry first looks for the marker so a partial failure does not create
-a duplicate review.
-
-## Skill resolution and APM
-
-The review skill is resolved in this order:
-
-1. A command-line `--skills-dir` override.
-2. `skill.directory` in `config.yaml`.
-3. `$HOME/.agents/skills`.
-4. Failure with an actionable diagnostic.
-
-The pull request checkout is never a skill source. Each job uses a copied snapshot so a global skill update cannot
-change a running review.
-
-APM is an optional installation mechanism. APM can install and pin the skill in a directory that `reviewctl` already
-searches, but `reviewctl` does not invoke APM and does not require an APM manifest or lockfile. This keeps the runtime
-small while preserving compatibility with APM-managed skills.
-
-## Harness boundary
-
-Harness support is compiled into the binary. The MVP uses a small switch and one Codex-specific file rather than a
-plugin framework:
-
-```text
-internal/harness/
-├── harness.go
-└── codex.go
-```
-
-The common harness boundary accepts a prepared job and returns a validated receipt. `codex.go` owns Codex installation
-checks, command construction, isolated working-directory settings, skill placement, process cancellation, and native
-structured-output handling.
-
-A future harness is added by creating another source file and adding one switch case. Dynamic plugins, capability
-negotiation, and a public harness SDK are outside the MVP.
-
-## Provider boundary
-
-Provider support follows the same compiled-in pattern:
-
-```text
-internal/provider/
-├── provider.go
-└── github.go
-```
-
-The GitHub provider owns deterministic discovery, author lookup, current-head lookup, and receipt verification through
-`gh`. It does not implement review judgment or publication composition. Those remain in the agent and skill workflow.
-
-The common target model contains a provider name, repository identity, provider-local change number, canonical URL,
-head SHA, draft state, and author login. GitHub maps the change number to a pull request number. A future GitLab
-provider maps it to a merge request IID. Other provider-specific terminology stays inside its adapter.
-
-A future GitLab implementation adds `gitlab.go`, uses `glab`, and maps merge requests into the same target model. It
-does not require changes to the scheduler or harness adapter. The architecture does not attempt to normalize GitHub
-reviews and GitLab discussions before that implementation exists.
+A GitLab implementation may later add provider-specific discovery and merge request handling. Another harness may
+later add its own command and receipt decoding. Neither future implementation is part of the MVP, and the MVP does not
+normalize features that GitHub and Codex do not need.
 
 ## CLI surface
 
-The MVP command surface is intentionally small:
-
 ```text
-reviewctl doctor
-reviewctl review <PR>... [--publish] [--parallel N] [--output text|json]
-reviewctl run [--once] [--parallel N]
-reviewctl status [--output text|json]
+reviewctl [--json] init
+reviewctl [--json] doctor
+reviewctl [--json] review <pull-request-url>
+reviewctl [--json] bulk-review <pull-request-url>...
+reviewctl [--json] run
+reviewctl [--json] status [--limit <count>]
 reviewctl --help
 reviewctl --version
 ```
 
-- `doctor` validates configuration, the trust list, repositories, GitHub authentication, Codex authentication, the
-  selected skill, and writable local paths.
-- `review` processes an explicit list synchronously.
-- `run` discovers and processes eligible pull requests.
-- `status` reports scheduler state, active jobs, recent outcomes, and actionable failures.
+- `init` creates configuration without overwriting an existing file.
+- `doctor` checks configuration, GitHub, Codex, APM, the locked skill set, SQLite, and local paths.
+- `review` enqueues one pull request.
+- `bulk-review` enqueues several pull requests in one transaction.
+- `run` performs one discovery and processing cycle.
+- `status` shows the pending queue, bounded recent history, and whether a `run` lock is held. Its default history limit
+  is 20.
 
-The CLI uses Cobra for command parsing and help generation. Cobra remains a transport layer; application logic does
-not depend on Cobra. Configuration uses a direct YAML decoder, and durable state uses SQLite.
+Commands do not open an editor, pager, or interactive confirmation. They do not depend on the source checkout or the
+caller's current directory.
 
-## Output contract
+## Agent-friendly CLI contract
 
-Human-readable text is the default. `--output json` returns one structured result document on standard output.
-Progress and diagnostics go to standard error so they cannot corrupt structured output.
+Human-readable text is the default. The global `--json` flag gives every operational command one deterministic,
+machine-readable result. JSON mode writes exactly one JSON object to stdout on success or failure. Stderr is reserved
+for diagnostics and never contains result data. The MVP emits no color or progress animation.
 
-Errors in JSON mode contain a stable machine-readable code, a message, whether retry may help, and an actionable hint.
-Exit status reports process success or failure. A valid `REQUEST_CHANGES` review exits successfully.
+The process exit code has only three meanings:
 
-The CLI does not open an editor, pager, or interactive confirmation during `run` or `review`. GitHub publication is
-authorized only by configuration for `run` or by `--publish` for `review`.
+- `0`: success or a safe idempotent no-op, including `already_queued` and `already_running`;
+- `1`: an operational failure, including a `run` in which any queued review failed; and
+- `2`: invalid command syntax or input.
+
+JSON failures contain a short stable error `code` and a bounded message. The MVP does not add report versions, JSON
+Schema files, or a separate agent protocol.
+
+Command results expose the smallest useful facts:
+
+- `init` returns the configuration path it created.
+- `doctor` returns each prerequisite and whether it is ready.
+- `review` returns the pull request identity and `queued` or `already_queued`.
+- `bulk-review` returns one result per argument in input order.
+- `run` returns discovery and processing counts plus the outcome and review URL for each attempted pull request.
+- `status` returns the queue, at most the requested number of history rows, and whether `run` is active.
+
+Help text states that `review` and `bulk-review` change only the local queue, while `run` may publish GitHub reviews
+when publication is enabled. This keeps the external-write boundary visible to a calling agent without adding an
+interactive confirmation.
 
 ## Local persistence
 
@@ -362,38 +366,57 @@ Default paths follow XDG conventions:
 ```text
 config: $XDG_CONFIG_HOME/reviewctl/config.yaml
 state:  $XDG_STATE_HOME/reviewctl/reviewctl.db
-cache:  $XDG_CACHE_HOME/reviewctl/jobs/
+cache:  $XDG_CACHE_HOME/reviewctl/
+lock:   $XDG_RUNTIME_DIR/reviewctl/run.lock
 ```
 
-The fallbacks are:
+When an XDG variable is unset, `reviewctl` uses the corresponding user directory under `~/.config`, `~/.local/state`,
+or `~/.cache`. The lock falls back to the state directory when no runtime directory is available.
 
-```text
-config: ~/.config/reviewctl/config.yaml
-state:  ~/.local/state/reviewctl/reviewctl.db
-cache:  ~/.cache/reviewctl/jobs/
-```
+## Consistency rules
 
-GitHub and Codex credentials remain owned by their respective CLIs. `reviewctl` does not copy tokens into its
-configuration or database.
+- Only one `run` process consumes the queue.
+- Producer and status commands remain available while `run` is active.
+- The queue contains one entry per pull request.
+- A queue entry is deleted only after confirmed success or recovery of an existing published review.
+- Every failed Codex execution writes bounded history and leaves the pull request queued.
+- Discovery updates the baseline and queue atomically.
+- No database transaction remains open during external commands.
+- No untrusted pull request reaches Codex.
+- Publication requires explicit configuration and an exact head check.
+- GitHub review outcomes remain separate from process success or failure.
 
-## Consistency invariants
+## Tests
 
-- No harness starts before repository, provider, author, and configuration checks succeed.
-- An empty trust list never means "trust everyone."
-- Publication never occurs without explicit permission.
-- A receipt must identify the expected repository, pull request, head SHA, and skill digest.
-- Only one process may hold the lease for a job at a time.
-- A running job always uses an immutable skill snapshot.
-- Pull request verdicts remain separate from process failures.
-- Provider and harness concerns remain independent.
+Unit tests cover pure configuration, URL parsing, trust checks, event detection, marker and receipt validation, and
+queue decisions.
 
-## Expected extensions
+Integration tests use real SQLite and temporary directories. Scripted `gh`, APM, and Codex processes verify one full
+cycle, concurrent producers, process-lock behavior, failure retention, success deletion, history, cancellation, and
+marker recovery. Tests do not reproduce a multiprocess lease or filesystem attack matrix.
 
-The design leaves room for these additions without implementing them:
+Black-box CLI tests invoke the built command from a temporary directory without a TTY. They parse every `--json`
+result, verify stdout and stderr separation, exit codes, deterministic bulk ordering, bounded status output, and the
+documented idempotent no-op results.
 
-- Another harness through a new compiled-in harness file.
-- GitLab through a new compiled-in provider file.
-- Static-only processing for untrusted authors.
-- Restricted credentials or a constrained provider-command proxy.
-- File or standard-input submission for lists larger than practical command lines.
-- APM-managed installation instructions or a separate `reviewctl` usage skill.
+A local live end-to-end test uses the real GitHub and Codex credentials only on the
+[canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It rechecks the repository, pull request,
+author, open non-draft state, head, and exact marker count before Codex. It accepts zero or one marker and rejects
+duplicates. Every invocation establishes the discovery baseline and records one publication-disabled retryable
+failure. With zero markers, it verifies a published `COMMENT` review; with one marker, it verifies recovery. Both modes
+enqueue the fixture again and verify another recovery without duplicate publication. Missing live prerequisites block
+this test rather than turning it into a passing skip. The first zero-marker run proves publication; later runs prove
+recovery without requiring a fixture head change.
+
+## Non-goals
+
+- Multiple concurrent `run` consumers.
+- Parallel Codex sessions in the MVP.
+- Renewable leases, worker ownership, retry deadlines, or crash reclaim.
+- A long-running daemon, IPC protocol, or HTTP control server.
+- Runtime provider or harness plugins.
+- GitLab or a harness other than Codex.
+- Workspace reuse or recovery.
+- A custom secure filesystem layer.
+- Storing complete diffs, source trees, or published review bodies in SQLite.
+- A service installer, packaged distribution, self-update, or multi-OS support.

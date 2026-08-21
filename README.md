@@ -1,8 +1,16 @@
 # reviewctl
 
-`reviewctl` is a local scheduler for agent-driven pull request reviews across multiple repositories.
+`reviewctl` is a local CLI that queues GitHub pull requests and uses Codex to publish reviews.
 
-The project aims to automate initial and repeat reviews while keeping execution, credentials, and agent usage on the
-user's machine.
+## Install
 
-**Status:** Early development.
+```shell
+curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/scripts/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+reviewctl --help
+```
+
+`reviewctl` requires authenticated GitHub CLI (`gh`), Codex CLI, and APM.
+
+Live E2E reviews are restricted to the canonical
+[reviewctl pull request 24](https://github.com/denifilatoff/reviewctl/pull/24).

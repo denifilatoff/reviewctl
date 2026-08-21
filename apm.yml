@@ -1,0 +1,10 @@
+name: reviewctl
+version: 0.1.0
+description: Locked review skill used by reviewctl attempts.
+
+targets:
+  - codex
+
+dependencies:
+  apm:
+    - Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
