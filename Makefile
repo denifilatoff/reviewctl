@@ -1,4 +1,4 @@
-.PHONY: build ci fmt test vet apm-check live-e2e
+.PHONY: build ci fmt test vet apm-check live-e2e launchd-smoke
 
 build:
 	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; go build -o "$$build_dir/reviewctl" .
@@ -23,3 +23,8 @@ live-e2e: build
 	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; \
 		go build -o "$$build_dir/reviewctl" .; \
 		REVIEWCTL_BIN="$$build_dir/reviewctl" ./scripts/live-e2e.sh
+
+launchd-smoke:
+	@build_dir="$$(mktemp -d)"; trap 'rm -rf "$$build_dir"' EXIT; \
+		go build -o "$$build_dir/reviewctl" .; \
+		REVIEWCTL_BIN="$$build_dir/reviewctl" ./scripts/launchd-smoke.sh

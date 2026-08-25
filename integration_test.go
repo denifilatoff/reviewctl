@@ -655,6 +655,87 @@ func TestLaunchdScheduledRunSmoke(t *testing.T) {
 	}
 }
 
+func TestLaunchdSmokeScriptRunsAndCleansUp(t *testing.T) {
+	if _, err := exec.LookPath("/usr/libexec/PlistBuddy"); err != nil {
+		t.Skip("PlistBuddy is required for the macOS launchd smoke contract test")
+	}
+	temp := t.TempDir()
+	binary := filepath.Join(temp, "reviewctl")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v\n%s", err, output)
+	}
+	fakeBin := filepath.Join(temp, "bin")
+	if err := os.Mkdir(fakeBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchctl := `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$REVIEWCTL_LAUNCHD_TEST_CALLS"
+case $1 in
+bootstrap)
+  printf '%s' "$3" >"$REVIEWCTL_LAUNCHD_TEST_STATE"
+  ;;
+kickstart)
+  plist=$(cat "$REVIEWCTL_LAUNCHD_TEST_STATE")
+  value() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist"; }
+  stdout=$(value StandardOutPath)
+  stderr=$(value StandardErrorPath)
+  if ! env PATH="$(value EnvironmentVariables:PATH)" \
+    XDG_CONFIG_HOME="$(value EnvironmentVariables:XDG_CONFIG_HOME)" \
+    XDG_STATE_HOME="$(value EnvironmentVariables:XDG_STATE_HOME)" \
+    XDG_CACHE_HOME="$(value EnvironmentVariables:XDG_CACHE_HOME)" \
+    XDG_RUNTIME_DIR="$(value EnvironmentVariables:XDG_RUNTIME_DIR)" \
+    "$(value ProgramArguments:0)" "$(value ProgramArguments:1)" "$(value ProgramArguments:2)" \
+    >"$stdout" 2>"$stderr"; then
+    cat "$stdout" >&2
+    cat "$stderr" >&2
+    exit 1
+  fi
+  ;;
+bootout) ;;
+*) exit 64 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "launchctl"), []byte(launchctl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	temporaryDir := filepath.Join(temp, "tmp")
+	if err := os.Mkdir(temporaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(temp, "launchctl-calls")
+	command := exec.Command("sh", "scripts/launchd-smoke.sh")
+	command.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"REVIEWCTL_BIN="+binary,
+		"REVIEWCTL_LAUNCHD_TEST_CALLS="+calls,
+		"REVIEWCTL_LAUNCHD_TEST_STATE="+filepath.Join(temp, "launchctl-state"),
+		"TMPDIR="+temporaryDir,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		callData, _ := os.ReadFile(calls)
+		t.Fatalf("launchd smoke failed: %v\n%s\nlaunchctl calls:\n%s", err, output, callData)
+	}
+	if !strings.Contains(string(output), "launchd smoke passed: discovery_succeeded=1 queued=0 attempted=0") {
+		t.Fatalf("launchd smoke output = %q", output)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "bootstrap gui/") ||
+		!strings.HasPrefix(lines[1], "kickstart -k gui/") || !strings.HasPrefix(lines[2], "bootout gui/") {
+		t.Fatalf("launchctl calls = %q", data)
+	}
+	entries, err := os.ReadDir(temporaryDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("temporary data remains: entries=%v err=%v", entries, err)
+	}
+}
+
 func waitForPath(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
