@@ -60,8 +60,7 @@ Keep `publish: false` while setting up a production schedule.
    does not queue them.
 4. Add any existing pull requests that still need review with `reviewctl review` or `reviewctl bulk-review`.
 5. Change `publish` to `true`, run `reviewctl doctor` again, then run `reviewctl --json run` once manually.
-6. Follow [Schedule with launchd](#schedule-with-launchd). Confirm that the plist `PATH` contains the directories for
-   `reviewctl`, `gh`, `codex`, and `apm`.
+6. Follow [Schedule with launchd](#schedule-with-launchd).
 
 Later scheduled runs queue new ready pull requests, draft-to-ready transitions, and head changes.
 
@@ -110,6 +109,10 @@ reviewctl run
 
 Only one `run` process can execute at once. A concurrent call reports `already_running` and exits successfully. A
 failed discovery or review attempt makes `run` exit with code `1`; failed review entries remain queued for a later run.
+If a pull request head changes during an attempt, `run` reports `head_changed` and leaves the entry queued.
+
+A review attempt can take several minutes, and `run` writes its result after the attempt finishes. Use
+`reviewctl status` to check `run_active`; do not interrupt an active attempt or start a replacement process.
 
 ## Use JSON and exit codes
 
@@ -128,23 +131,22 @@ configuration, lock, or state setup errors, go to standard error.
 
 ## Schedule with launchd
 
-On macOS, use the tracked
-[launchd plist](https://raw.githubusercontent.com/denifilatoff/reviewctl/main/docs/com.denifilatoff.reviewctl.plist).
-It runs `reviewctl --json run` every 300 seconds and writes logs under `~/Library/Logs`. Run `reviewctl doctor` first.
-
-Download the plist, replace its `/Users/you` paths, validate it, and load it into your GUI domain.
+On macOS, install a `launchd` job with a 10-minute interval:
 
 ```shell
-label=com.denifilatoff.reviewctl
-plist="$HOME/Library/LaunchAgents/$label.plist"
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/docs/com.denifilatoff.reviewctl.plist \
-  -o "$plist"
-sed -i '' "s#/Users/you#$HOME#g" "$plist"
-plutil -lint "$plist"
-launchctl bootstrap "gui/$(id -u)" "$plist"
-launchctl kickstart -k "gui/$(id -u)/$label"
+(
+  set -e
+  installer=$(mktemp)
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/scripts/install-launchd.sh -o "$installer"
+  sh "$installer" 600
+)
 ```
+
+The interval is optional and defaults to 300 seconds. The installer finds `reviewctl`, `gh`, `codex`, and `apm` in the
+current `PATH`, preserves the configured XDG locations, runs `reviewctl doctor` in the scheduled environment, validates
+the generated plist, and loads the job. It writes the plist under `~/Library/LaunchAgents` and logs under
+`~/Library/Logs`. If a plist already exists, the installer asks before replacing it.
 
 Inspect the loaded job and its logs with:
 
@@ -153,6 +155,10 @@ launchctl print "gui/$(id -u)/com.denifilatoff.reviewctl"
 tail -n 100 "$HOME/Library/Logs/reviewctl.out.log"
 tail -n 100 "$HOME/Library/Logs/reviewctl.err.log"
 ```
+
+`state = not running` is expected between intervals because `reviewctl run` exits after one cycle. Confirm that
+`runs` is greater than zero, `last exit code` is `0`, the latest standard-output record has `"status":"success"`,
+and the standard-error log is empty.
 
 Remove the scheduled job without deleting the binary, configuration, or SQLite state:
 
