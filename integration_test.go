@@ -578,80 +578,164 @@ func TestDoctorMarksGitHubUnavailableWithoutValidConfig(t *testing.T) {
 	}
 }
 
-func TestLaunchdScheduledRunSmoke(t *testing.T) {
-	plutil, err := exec.LookPath("plutil")
-	if err != nil {
-		t.Skip("plutil is required for the macOS launchd smoke test")
-	}
-	convert := exec.Command(plutil, "-convert", "json", "-o", "-", "docs/com.denifilatoff.reviewctl.plist")
-	data, err := convert.Output()
-	if err != nil {
-		t.Fatalf("decode launchd plist: %v", err)
-	}
-	var plist struct {
-		Label                string            `json:"Label"`
-		ProgramArguments     []string          `json:"ProgramArguments"`
-		EnvironmentVariables map[string]string `json:"EnvironmentVariables"`
-		StartInterval        int               `json:"StartInterval"`
-	}
-	if err := json.Unmarshal(data, &plist); err != nil {
+func TestInstallLaunchdScript(t *testing.T) {
+	temp := t.TempDir()
+	home := filepath.Join(temp, "home")
+	fakeBin := filepath.Join(temp, "bin")
+	if err := os.MkdirAll(fakeBin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if plist.Label != "com.denifilatoff.reviewctl" || plist.StartInterval != 300 ||
-		len(plist.ProgramArguments) != 3 || plist.ProgramArguments[1] != "--json" ||
-		plist.ProgramArguments[2] != "run" {
-		t.Fatalf("scheduled invocation = %+v", plist)
-	}
-	wantEnvironment := map[string]string{
-		"XDG_CONFIG_HOME": "/Users/you/.config",
-		"XDG_STATE_HOME":  "/Users/you/.local/state",
-		"XDG_CACHE_HOME":  "/Users/you/.cache",
-		"XDG_RUNTIME_DIR": "/Users/you/.local/state",
-		"PATH":            "/Users/you/.local/bin:/Applications/ChatGPT.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-	}
-	if len(plist.EnvironmentVariables) != len(wantEnvironment) {
-		t.Fatalf("launchd environment = %#v", plist.EnvironmentVariables)
-	}
-	for name, want := range wantEnvironment {
-		if got := plist.EnvironmentVariables[name]; got != want {
-			t.Fatalf("launchd %s = %q, want %q", name, got, want)
+	writeExecutable := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte("#!/bin/sh\nset -eu\n"+body), 0o700); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if plist.EnvironmentVariables["XDG_RUNTIME_DIR"] != plist.EnvironmentVariables["XDG_STATE_HOME"] ||
-		filepath.Join(plist.EnvironmentVariables["XDG_STATE_HOME"], "reviewctl", "reviewctl.db") !=
-			"/Users/you/.local/state/reviewctl/reviewctl.db" ||
-		filepath.Join(plist.EnvironmentVariables["XDG_RUNTIME_DIR"], "reviewctl", "run.lock") !=
-			"/Users/you/.local/state/reviewctl/run.lock" {
-		t.Fatalf("launchd state and lock paths diverge: %#v", plist.EnvironmentVariables)
+	writeExecutable("uname", "printf 'Darwin\\n'\n")
+	writeExecutable("reviewctl", `
+[ "$*" = "--json doctor" ]
+printf '%s\n' "$*" >"$HOME/doctor.args"
+env | sort >"$HOME/doctor.env"
+`)
+	for _, name := range []string{"gh", "codex", "apm"} {
+		writeExecutable(name, "exit 0\n")
+	}
+	writeExecutable("plutil", `
+[ "$1" = "-lint" ]
+[ -f "$2" ]
+printf '%s\n' "$*" >"$HOME/plutil.calls"
+`)
+	writeExecutable("launchctl", `
+printf '%s\n' "$*" >>"$HOME/launchctl.calls"
+case $1 in
+print)
+  [ -f "$HOME/launchctl.state" ] || exit 1
+  cat "$HOME/launchctl.state"
+  ;;
+bootstrap)
+  if [ -f "$HOME/bootstrap.fail" ]; then
+    rm "$HOME/bootstrap.fail"
+    exit 70
+  fi
+  ;;
+esac
+`)
+
+	command := exec.Command("sh", "scripts/install-launchd.sh", "600")
+	command.Env = []string{
+		"HOME=" + home,
+		"PATH=" + fakeBin + string(os.PathListSeparator) + "/usr/bin:/bin",
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install launchd: %v\n%s", err, output)
 	}
 
-	temp := t.TempDir()
-	binary := filepath.Join(temp, "reviewctl")
-	build := exec.Command("go", "build", "-o", binary, ".")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build CLI: %v\n%s", err, output)
-	}
-	fakeBin := installProcessHelpers(t, temp)
-	configHome := filepath.Join(temp, "config")
-	if err := os.MkdirAll(filepath.Join(configHome, "reviewctl"), 0o700); err != nil {
+	plist := filepath.Join(home, "Library", "LaunchAgents", "com.denifilatoff.reviewctl.plist")
+	data, err := os.ReadFile(plist)
+	if err != nil {
 		t.Fatal(err)
 	}
-	config := "harness: codex\npublish: true\ntrusted_authors: [alice]\nrepositories:\n" +
-		"  - provider: github\n    repository: acme/service\n"
-	if err := os.WriteFile(filepath.Join(configHome, "reviewctl", "config.yaml"), []byte(config), 0o600); err != nil {
+	wantFragments := []string{
+		"<string>" + filepath.Join(fakeBin, "reviewctl") + "</string>",
+		"<string>--json</string>",
+		"<string>run</string>",
+		"<integer>600</integer>",
+		"<string>" + fakeBin + ":/usr/bin:/bin</string>",
+		"<string>" + filepath.Join(home, ".config") + "</string>",
+		"<string>" + filepath.Join(home, ".local", "state") + "</string>",
+		"<string>" + filepath.Join(home, ".cache") + "</string>",
+	}
+	for _, fragment := range wantFragments {
+		if !bytes.Contains(data, []byte(fragment)) {
+			t.Fatalf("plist does not contain %q:\n%s", fragment, data)
+		}
+	}
+	info, err := os.Stat(plist)
+	if err != nil {
 		t.Fatal(err)
 	}
-	env := append(os.Environ(),
-		"GO_WANT_REVIEWCTL_HELPER=1",
-		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"XDG_CONFIG_HOME="+configHome,
-		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
-		"XDG_RUNTIME_DIR="+filepath.Join(temp, "runtime"),
-	)
-	result := runCLI(t, env, binary, plist.ProgramArguments[1:]...)
-	if result.exitCode != 0 || result.stderr != "" || result.object["command"] != "run" ||
-		result.object["status"] != "success" {
-		t.Fatalf("scheduled run = %+v", result)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("plist mode = %v", info.Mode().Perm())
+	}
+	doctorEnv, err := os.ReadFile(filepath.Join(home, "doctor.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{
+		"HOME=" + home,
+		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"XDG_STATE_HOME=" + filepath.Join(home, ".local", "state"),
+		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+		"XDG_RUNTIME_DIR=" + filepath.Join(home, ".local", "state"),
+	} {
+		if !bytes.Contains(doctorEnv, []byte(entry+"\n")) {
+			t.Fatalf("doctor environment does not contain %q:\n%s", entry, doctorEnv)
+		}
+	}
+	calls, err := os.ReadFile(filepath.Join(home, "launchctl.calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := fmt.Sprintf("gui/%d/com.denifilatoff.reviewctl", os.Getuid())
+	wantCalls := fmt.Sprintf("print %s\nbootstrap gui/%d %s\nkickstart -k %s\n", service, os.Getuid(), plist, service)
+	if string(calls) != wantCalls {
+		t.Fatalf("launchctl calls = %q, want %q", calls, wantCalls)
+	}
+
+	previousPlist := []byte("previous plist\n")
+	if err := os.WriteFile(plist, previousPlist, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "launchctl.state"), []byte("state = not running\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "bootstrap.fail"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(home, "launchctl.calls")); err != nil {
+		t.Fatal(err)
+	}
+	replace := exec.Command("sh", "scripts/install-launchd.sh", "900")
+	replace.Env = command.Env
+	if output, err := replace.CombinedOutput(); err == nil || !strings.Contains(string(output), "restored") {
+		t.Fatalf("failed replacement: err=%v output=%q", err, output)
+	}
+	data, err = os.ReadFile(plist)
+	if err != nil || !bytes.Equal(data, previousPlist) {
+		t.Fatalf("restored plist = %q, err = %v", data, err)
+	}
+	calls, err = os.ReadFile(filepath.Join(home, "launchctl.calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCalls = fmt.Sprintf("print %s\nbootout %s\nbootstrap gui/%d %s\nbootstrap gui/%d %s\n",
+		service, service, os.Getuid(), plist, os.Getuid(), plist)
+	if string(calls) != wantCalls {
+		t.Fatalf("replacement launchctl calls = %q, want %q", calls, wantCalls)
+	}
+
+	if err := os.WriteFile(filepath.Join(home, "launchctl.state"), []byte("state = running\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(home, "launchctl.calls")); err != nil {
+		t.Fatal(err)
+	}
+	running := exec.Command("sh", "scripts/install-launchd.sh", "900")
+	running.Env = command.Env
+	if output, err := running.CombinedOutput(); err == nil || !strings.Contains(string(output), "currently running") {
+		t.Fatalf("running replacement: err=%v output=%q", err, output)
+	}
+	calls, err = os.ReadFile(filepath.Join(home, "launchctl.calls"))
+	if err != nil || string(calls) != "print "+service+"\n" {
+		t.Fatalf("running launchctl calls = %q, err = %v", calls, err)
+	}
+
+	invalid := exec.Command("sh", "scripts/install-launchd.sh", "0")
+	invalid.Env = command.Env
+	if output, err := invalid.CombinedOutput(); err == nil || !strings.Contains(string(output), "positive integer") {
+		t.Fatalf("invalid interval: err=%v output=%q", err, output)
 	}
 }
 

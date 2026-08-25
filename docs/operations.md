@@ -60,8 +60,7 @@ Keep `publish: false` while setting up a production schedule.
    does not queue them.
 4. Add any existing pull requests that still need review with `reviewctl review` or `reviewctl bulk-review`.
 5. Change `publish` to `true`, run `reviewctl doctor` again, then run `reviewctl --json run` once manually.
-6. Follow [Schedule with launchd](#schedule-with-launchd). Run `command -v reviewctl gh codex apm`, then confirm that
-   the plist `PATH` contains the parent directory of every path reported by the command.
+6. Follow [Schedule with launchd](#schedule-with-launchd).
 
 Later scheduled runs queue new ready pull requests, draft-to-ready transitions, and head changes.
 
@@ -132,37 +131,16 @@ configuration, lock, or state setup errors, go to standard error.
 
 ## Schedule with launchd
 
-On macOS, use the tracked
-[launchd plist](https://raw.githubusercontent.com/denifilatoff/reviewctl/main/docs/com.denifilatoff.reviewctl.plist).
-It runs `reviewctl --json run` every 300 seconds and writes logs under `~/Library/Logs`. Run `reviewctl doctor` first.
-
-Download the plist, replace its `/Users/you` paths, validate it, and load it into your GUI domain.
-The tracked `PATH` covers common Homebrew locations and Codex bundled with ChatGPT. Add any other directories reported
-by `command -v reviewctl gh codex apm` before loading the job, using the parent directory of each reported path.
+On macOS, install a `launchd` job with a 10-minute interval:
 
 ```shell
-label=com.denifilatoff.reviewctl
-plist="$HOME/Library/LaunchAgents/$label.plist"
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/docs/com.denifilatoff.reviewctl.plist \
-  -o "$plist"
-sed -i '' "s#/Users/you#$HOME#g" "$plist"
+curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/scripts/install-launchd.sh | sh -s -- 600
 ```
 
-The plist defaults to 300 seconds. Set another interval before loading it when needed. For example, use 600 seconds for
-a 10-minute interval:
-
-```shell
-plutil -replace StartInterval -integer 600 "$plist"
-```
-
-Validate and load the job:
-
-```shell
-plutil -lint "$plist"
-launchctl bootstrap "gui/$(id -u)" "$plist"
-launchctl kickstart -k "gui/$(id -u)/$label"
-```
+The interval is optional and defaults to 300 seconds. The installer finds `reviewctl`, `gh`, `codex`, and `apm` in the
+current `PATH`, preserves the configured XDG locations, runs `reviewctl doctor` in the scheduled environment, validates
+the generated plist, and loads the job. It writes the plist under `~/Library/LaunchAgents` and logs under
+`~/Library/Logs`.
 
 Inspect the loaded job and its logs with:
 
