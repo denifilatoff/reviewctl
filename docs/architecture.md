@@ -9,6 +9,8 @@ Last updated: 2026-08-20
 `reviewctl` schedules Codex reviews of GitHub pull requests on one trusted laptop. It polls configured repositories,
 keeps a local queue, invokes Codex, and records the result in SQLite.
 
+For installation, configuration, and scheduling, see the [operations guide](operations.md).
+
 The tool uses the user's Codex subscription and GitHub CLI credentials. It does not require a hosted service, webhook,
 GitHub App, GitHub Actions workflow, or separate API billing.
 
@@ -419,4 +421,4 @@ recovery without requiring a fixture head change.
 - Workspace reuse or recovery.
 - A custom secure filesystem layer.
 - Storing complete diffs, source trees, or published review bodies in SQLite.
-- A service installer, packaged distribution, self-update, or multi-OS support.
+- A service installer, self-update, or Windows support. Packaged binary releases support macOS and Linux.
