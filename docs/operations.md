@@ -134,13 +134,19 @@ configuration, lock, or state setup errors, go to standard error.
 On macOS, install a `launchd` job with a 10-minute interval:
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/scripts/install-launchd.sh | sh -s -- 600
+(
+  set -e
+  installer=$(mktemp)
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/scripts/install-launchd.sh -o "$installer"
+  sh "$installer" 600
+)
 ```
 
 The interval is optional and defaults to 300 seconds. The installer finds `reviewctl`, `gh`, `codex`, and `apm` in the
 current `PATH`, preserves the configured XDG locations, runs `reviewctl doctor` in the scheduled environment, validates
 the generated plist, and loads the job. It writes the plist under `~/Library/LaunchAgents` and logs under
-`~/Library/Logs`.
+`~/Library/Logs`. If a plist already exists, the installer asks before replacing it.
 
 Inspect the loaded job and its logs with:
 

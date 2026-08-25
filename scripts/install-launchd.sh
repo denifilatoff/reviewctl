@@ -50,6 +50,18 @@ service=$domain/$label
 agents_dir=$home/Library/LaunchAgents
 logs_dir=$home/Library/Logs
 plist=$agents_dir/$label.plist
+if [ -e "$plist" ]; then
+	printf 'A launchd configuration already exists at %s. Replace it? [y/N] ' "$plist" >&2
+	answer=
+	IFS= read -r answer || true
+	case $answer in
+	y | Y | yes | Yes | YES) ;;
+	*)
+		echo "Existing launchd configuration was kept."
+		exit 0
+		;;
+	esac
+fi
 mkdir -p "$agents_dir" "$logs_dir"
 
 if ! env -i \
@@ -76,10 +88,8 @@ escaped_runtime=$(xml_escape "$runtime_dir")
 escaped_stdout=$(xml_escape "$logs_dir/reviewctl.out.log")
 escaped_stderr=$(xml_escape "$logs_dir/reviewctl.err.log")
 temporary_plist=$(mktemp "$plist.tmp.XXXXXX")
-backup_plist=
 cleanup() {
 	[ -z "$temporary_plist" ] || rm -f "$temporary_plist"
-	[ -z "$backup_plist" ] || rm -f "$backup_plist"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -122,39 +132,11 @@ EOF
 chmod 600 "$temporary_plist"
 "$plutil" -lint "$temporary_plist" >/dev/null
 
-loaded=0
-if service_status=$("$launchctl" print "$service" 2>/dev/null); then
-	case $service_status in
-	*"state = running"*) fail "reviewctl is currently running; retry after the review finishes" ;;
-	esac
-	loaded=1
-fi
-if [ -e "$plist" ]; then
-	backup_plist=$(mktemp "$plist.backup.XXXXXX")
-	cp -p "$plist" "$backup_plist"
-fi
-if [ "$loaded" -eq 1 ]; then
+if "$launchctl" print "$service" >/dev/null 2>&1; then
 	"$launchctl" bootout "$service"
 fi
-if ! mv "$temporary_plist" "$plist"; then
-	[ "$loaded" -eq 0 ] || "$launchctl" bootstrap "$domain" "$plist"
-	fail "could not replace $plist"
-fi
+mv "$temporary_plist" "$plist"
 temporary_plist=
-if ! "$launchctl" bootstrap "$domain" "$plist"; then
-	rm -f "$plist"
-	if [ -n "$backup_plist" ]; then
-		mv "$backup_plist" "$plist"
-		backup_plist=
-		if [ "$loaded" -eq 1 ]; then
-			"$launchctl" bootstrap "$domain" "$plist" ||
-				fail "the previous plist was restored, but its job could not be reloaded"
-		fi
-		fail "the replacement could not be loaded; the previous plist and job were restored"
-	fi
-	fail "the launchd job could not be loaded"
-fi
-[ -z "$backup_plist" ] || rm -f "$backup_plist"
-backup_plist=
+"$launchctl" bootstrap "$domain" "$plist"
 "$launchctl" kickstart -k "$service"
 printf 'Installed %s with a %s-second interval.\n' "$plist" "$interval"

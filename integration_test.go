@@ -685,51 +685,71 @@ esac
 	}
 
 	previousPlist := []byte("previous plist\n")
-	if err := os.WriteFile(plist, previousPlist, 0o600); err != nil {
-		t.Fatal(err)
+	for _, test := range []struct {
+		name  string
+		input string
+	}{
+		{name: "no", input: "n\n"},
+		{name: "default", input: "\n"},
+		{name: "EOF"},
+	} {
+		t.Run("decline "+test.name, func(t *testing.T) {
+			if err := os.WriteFile(plist, previousPlist, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{
+				filepath.Join(home, "launchctl.calls"),
+				filepath.Join(home, "doctor.args"),
+			} {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			}
+			decline := exec.Command("sh", "scripts/install-launchd.sh", "900")
+			decline.Env = command.Env
+			decline.Stdin = strings.NewReader(test.input)
+			output, err := decline.CombinedOutput()
+			if err != nil || !strings.Contains(string(output), "Existing launchd configuration was kept") {
+				t.Fatalf("decline replacement: err=%v output=%q", err, output)
+			}
+			data, err := os.ReadFile(plist)
+			if err != nil || !bytes.Equal(data, previousPlist) {
+				t.Fatalf("declined plist = %q, err = %v", data, err)
+			}
+			if _, err := os.Stat(filepath.Join(home, "doctor.args")); !os.IsNotExist(err) {
+				t.Fatalf("doctor ran before replacement confirmation: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, "launchctl.calls")); !os.IsNotExist(err) {
+				t.Fatalf("launchctl ran after replacement was declined: %v", err)
+			}
+		})
 	}
+
 	if err := os.WriteFile(filepath.Join(home, "launchctl.state"), []byte("state = not running\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(home, "bootstrap.fail"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(home, "launchctl.calls")); err != nil {
-		t.Fatal(err)
-	}
 	replace := exec.Command("sh", "scripts/install-launchd.sh", "900")
 	replace.Env = command.Env
-	if output, err := replace.CombinedOutput(); err == nil || !strings.Contains(string(output), "restored") {
+	replace.Stdin = strings.NewReader("y\n")
+	output, err = replace.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "Replace it? [y/N]") {
 		t.Fatalf("failed replacement: err=%v output=%q", err, output)
 	}
 	data, err = os.ReadFile(plist)
-	if err != nil || !bytes.Equal(data, previousPlist) {
-		t.Fatalf("restored plist = %q, err = %v", data, err)
+	if err != nil || !bytes.Contains(data, []byte("<integer>900</integer>")) {
+		t.Fatalf("accepted replacement plist = %q, err = %v", data, err)
 	}
 	calls, err = os.ReadFile(filepath.Join(home, "launchctl.calls"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCalls = fmt.Sprintf("print %s\nbootout %s\nbootstrap gui/%d %s\nbootstrap gui/%d %s\n",
-		service, service, os.Getuid(), plist, os.Getuid(), plist)
+	wantCalls = fmt.Sprintf("print %s\nbootout %s\nbootstrap gui/%d %s\n",
+		service, service, os.Getuid(), plist)
 	if string(calls) != wantCalls {
-		t.Fatalf("replacement launchctl calls = %q, want %q", calls, wantCalls)
-	}
-
-	if err := os.WriteFile(filepath.Join(home, "launchctl.state"), []byte("state = running\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(home, "launchctl.calls")); err != nil {
-		t.Fatal(err)
-	}
-	running := exec.Command("sh", "scripts/install-launchd.sh", "900")
-	running.Env = command.Env
-	if output, err := running.CombinedOutput(); err == nil || !strings.Contains(string(output), "currently running") {
-		t.Fatalf("running replacement: err=%v output=%q", err, output)
-	}
-	calls, err = os.ReadFile(filepath.Join(home, "launchctl.calls"))
-	if err != nil || string(calls) != "print "+service+"\n" {
-		t.Fatalf("running launchctl calls = %q, err = %v", calls, err)
+		t.Fatalf("accepted replacement launchctl calls = %q, want %q", calls, wantCalls)
 	}
 
 	invalid := exec.Command("sh", "scripts/install-launchd.sh", "0")
