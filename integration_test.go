@@ -597,7 +597,7 @@ func TestLaunchdScheduledRunSmoke(t *testing.T) {
 	if err := json.Unmarshal(data, &plist); err != nil {
 		t.Fatal(err)
 	}
-	if plist.Label != "com.denifilatoff.reviewctl" || plist.StartInterval < 1 ||
+	if plist.Label != "com.denifilatoff.reviewctl" || plist.StartInterval != 300 ||
 		len(plist.ProgramArguments) != 3 || plist.ProgramArguments[1] != "--json" ||
 		plist.ProgramArguments[2] != "run" {
 		t.Fatalf("scheduled invocation = %+v", plist)
@@ -607,7 +607,7 @@ func TestLaunchdScheduledRunSmoke(t *testing.T) {
 		"XDG_STATE_HOME":  "/Users/you/.local/state",
 		"XDG_CACHE_HOME":  "/Users/you/.cache",
 		"XDG_RUNTIME_DIR": "/Users/you/.local/state",
-		"PATH":            "/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+		"PATH":            "/Users/you/.local/bin:/Applications/ChatGPT.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
 	}
 	if len(plist.EnvironmentVariables) != len(wantEnvironment) {
 		t.Fatalf("launchd environment = %#v", plist.EnvironmentVariables)
@@ -904,10 +904,16 @@ repositories:
 		t.Fatalf("enqueue moving-head fixture: %+v", result)
 	}
 	headChangeEnv := append(append([]string{}, env...),
-		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
+		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"),
+		"REVIEWCTL_FAKE_RECEIPT_HEAD=fedcba9876543210fedcba9876543210fedcba98")
 	result = runCLI(t, headChangeEnv, binary, "--json", "run")
 	if result.exitCode != 1 || !strings.Contains(result.stdout, `"code":"head_changed"`) {
 		t.Fatalf("moving head result: %+v", result)
+	}
+	queue, history, err = store.Status(context.Background(), 1)
+	if err != nil || len(queue) != 2 || queue[1].Number != 7 || len(history) != 1 ||
+		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
+		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
 	}
 }
 
@@ -1683,6 +1689,9 @@ func helperCodex(args []string) {
 		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
 		Recovered: recovered,
+	}
+	if head := os.Getenv("REVIEWCTL_FAKE_RECEIPT_HEAD"); head != "" {
+		receipt.HeadSHA = head
 	}
 	data, _ := json.Marshal(receipt)
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {

@@ -159,15 +159,6 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("codex_failed", "%v", err))
 		return result
 	}
-	receipt, err := readReceipt(receiptPath)
-	if err != nil {
-		setAttemptError(&result, fail("receipt_invalid", "%v", err))
-		return result
-	}
-	if err := ValidateReceipt(receipt, pr, resolved.HeadSHA, digest, selfAuthored); err != nil {
-		setAttemptError(&result, fail("receipt_invalid", "%v", err))
-		return result
-	}
 	final, err := resolveGitHub(ctx, pr)
 	if err != nil {
 		setAttemptError(&result, err)
@@ -175,6 +166,15 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 	}
 	if final.HeadSHA != resolved.HeadSHA {
 		setAttemptError(&result, fail("head_changed", "pull request head changed during review"))
+		return result
+	}
+	receipt, err := readReceipt(receiptPath)
+	if err != nil {
+		setAttemptError(&result, fail("receipt_invalid", "%v", err))
+		return result
+	}
+	if err := ValidateReceipt(receipt, pr, resolved.HeadSHA, digest, selfAuthored); err != nil {
+		setAttemptError(&result, fail("receipt_invalid", "%v", err))
 		return result
 	}
 	result.Success = true

@@ -60,8 +60,8 @@ Keep `publish: false` while setting up a production schedule.
    does not queue them.
 4. Add any existing pull requests that still need review with `reviewctl review` or `reviewctl bulk-review`.
 5. Change `publish` to `true`, run `reviewctl doctor` again, then run `reviewctl --json run` once manually.
-6. Follow [Schedule with launchd](#schedule-with-launchd). Confirm that the plist `PATH` contains the directories for
-   `reviewctl`, `gh`, `codex`, and `apm`.
+6. Follow [Schedule with launchd](#schedule-with-launchd). Run `command -v reviewctl gh codex apm`, then confirm that
+   the plist `PATH` contains the parent directory of every path reported by the command.
 
 Later scheduled runs queue new ready pull requests, draft-to-ready transitions, and head changes.
 
@@ -110,6 +110,10 @@ reviewctl run
 
 Only one `run` process can execute at once. A concurrent call reports `already_running` and exits successfully. A
 failed discovery or review attempt makes `run` exit with code `1`; failed review entries remain queued for a later run.
+If a pull request head changes during an attempt, `run` reports `head_changed` and leaves the entry queued.
+
+A review attempt can take several minutes, and `run` writes its result after the attempt finishes. Use
+`reviewctl status` to check `run_active`; do not interrupt an active attempt or start a replacement process.
 
 ## Use JSON and exit codes
 
@@ -133,6 +137,8 @@ On macOS, use the tracked
 It runs `reviewctl --json run` every 300 seconds and writes logs under `~/Library/Logs`. Run `reviewctl doctor` first.
 
 Download the plist, replace its `/Users/you` paths, validate it, and load it into your GUI domain.
+The tracked `PATH` covers common Homebrew locations and Codex bundled with ChatGPT. Add any other directories reported
+by `command -v reviewctl gh codex apm` before loading the job, using the parent directory of each reported path.
 
 ```shell
 label=com.denifilatoff.reviewctl
@@ -141,6 +147,18 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 curl -fsSL https://raw.githubusercontent.com/denifilatoff/reviewctl/main/docs/com.denifilatoff.reviewctl.plist \
   -o "$plist"
 sed -i '' "s#/Users/you#$HOME#g" "$plist"
+```
+
+The plist defaults to 300 seconds. Set another interval before loading it when needed. For example, use 600 seconds for
+a 10-minute interval:
+
+```shell
+plutil -replace StartInterval -integer 600 "$plist"
+```
+
+Validate and load the job:
+
+```shell
 plutil -lint "$plist"
 launchctl bootstrap "gui/$(id -u)" "$plist"
 launchctl kickstart -k "gui/$(id -u)/$label"
@@ -153,6 +171,10 @@ launchctl print "gui/$(id -u)/com.denifilatoff.reviewctl"
 tail -n 100 "$HOME/Library/Logs/reviewctl.out.log"
 tail -n 100 "$HOME/Library/Logs/reviewctl.err.log"
 ```
+
+`state = not running` is expected between intervals because `reviewctl run` exits after one cycle. Confirm that
+`runs` is greater than zero, `last exit code` is `0`, the latest standard-output record has `"status":"success"`,
+and the standard-error log is empty.
 
 Remove the scheduled job without deleting the binary, configuration, or SQLite state:
 
