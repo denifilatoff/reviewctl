@@ -693,7 +693,9 @@ kickstart)
     exit 1
   fi
   ;;
-bootout) ;;
+bootout)
+  [ "${REVIEWCTL_LAUNCHD_TEST_BOOTOUT_FAIL:-}" != 1 ] || exit 70
+  ;;
 *) exit 64 ;;
 esac
 `
@@ -734,6 +736,31 @@ esac
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("temporary data remains: entries=%v err=%v", entries, err)
 	}
+
+	t.Run("bootout failure", func(t *testing.T) {
+		failureTemporaryDir := filepath.Join(temp, "failure-tmp")
+		if err := os.Mkdir(failureTemporaryDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("sh", "scripts/launchd-smoke.sh")
+		command.Env = append(os.Environ(),
+			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"REVIEWCTL_BIN="+binary,
+			"REVIEWCTL_LAUNCHD_TEST_CALLS="+calls,
+			"REVIEWCTL_LAUNCHD_TEST_STATE="+filepath.Join(temp, "launchctl-state"),
+			"REVIEWCTL_LAUNCHD_TEST_BOOTOUT_FAIL=1",
+			"TMPDIR="+failureTemporaryDir,
+		)
+		output, err := command.CombinedOutput()
+		entries, readErr := os.ReadDir(failureTemporaryDir)
+		if readErr != nil || len(entries) != 0 {
+			t.Fatalf("temporary data remains: entries=%v err=%v", entries, readErr)
+		}
+		if err == nil || strings.Contains(string(output), "launchd smoke passed:") ||
+			!strings.Contains(string(output), "launchd smoke could not unload temporary job") {
+			t.Fatalf("bootout failure: err=%v output=%q", err, output)
+		}
+	})
 }
 
 func waitForPath(t *testing.T, path string) {

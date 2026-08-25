@@ -19,10 +19,18 @@ work=$(mktemp -d "$temporary_root/reviewctl-launchd-smoke.XXXXXX")
 label="com.denifilatoff.reviewctl.smoke.$uid.$$"
 service="$domain/$label"
 cleanup() {
-	launchctl bootout "$service" >/dev/null 2>&1 || true
-	rm -rf "$work"
+	status=$1
+	trap - EXIT
+	if ! launchctl bootout "$service" >/dev/null 2>&1; then
+		echo "launchd smoke could not unload temporary job" >&2
+		status=1
+	fi
+	if ! rm -rf "$work"; then
+		status=1
+	fi
+	return "$status"
 }
-trap cleanup EXIT
+trap 'cleanup $?' EXIT
 trap 'exit 1' HUP INT TERM
 
 mkdir -p "$work/bin" "$work/config/reviewctl" "$work/state" "$work/cache" "$work/runtime" "$work/tmp"
@@ -110,4 +118,5 @@ for field in '"command":"run"' '"status":"success"' '"discovery_succeeded":1' \
 		exit 1
 	fi
 done
+cleanup 0
 printf 'launchd smoke passed: discovery_succeeded=1 queued=0 attempted=0\n'
