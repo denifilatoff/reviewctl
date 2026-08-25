@@ -104,7 +104,9 @@ reviewctl --json status --limit 50
 
 Exit code `0` means success or a safe no-op, such as `already_queued` or `already_running`. Exit code `1` means an
 operational failure. Exit code `2` means invalid syntax or input. In JSON mode, both successful and failed results go
-to standard output; human-readable failures go to standard error.
+to standard output. In human mode, `doctor` and completed `run` commands report operational failures on standard
+output. Errors that stop a command before it produces a result, such as invalid invocation or input and `run`
+configuration, lock, or state setup errors, go to standard error.
 
 ## Schedule with launchd
 
