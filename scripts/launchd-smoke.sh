@@ -26,6 +26,7 @@ cleanup() {
 		status=1
 	fi
 	if ! rm -rf "$work"; then
+		echo "launchd smoke could not remove temporary workspace: $work" >&2
 		status=1
 	fi
 	return "$status"

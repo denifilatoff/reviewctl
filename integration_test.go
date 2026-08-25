@@ -761,6 +761,35 @@ esac
 			t.Fatalf("bootout failure: err=%v output=%q", err, output)
 		}
 	})
+
+	t.Run("temporary workspace removal failure", func(t *testing.T) {
+		removalTemporaryDir := filepath.Join(temp, "removal-failure-tmp")
+		if err := os.Mkdir(removalTemporaryDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		removalTarget := filepath.Join(temp, "removal-target")
+		if err := os.WriteFile(filepath.Join(fakeBin, "rm"), []byte(`#!/bin/sh
+printf '%s' "$2" >"$REVIEWCTL_LAUNCHD_TEST_RM_TARGET"
+exit 71
+`), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("sh", "scripts/launchd-smoke.sh")
+		command.Env = append(os.Environ(),
+			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"REVIEWCTL_BIN="+binary,
+			"REVIEWCTL_LAUNCHD_TEST_CALLS="+calls,
+			"REVIEWCTL_LAUNCHD_TEST_RM_TARGET="+removalTarget,
+			"REVIEWCTL_LAUNCHD_TEST_STATE="+filepath.Join(temp, "launchctl-state"),
+			"TMPDIR="+removalTemporaryDir,
+		)
+		output, err := command.CombinedOutput()
+		work, readErr := os.ReadFile(removalTarget)
+		if err == nil || readErr != nil || !strings.Contains(string(output),
+			"launchd smoke could not remove temporary workspace: "+string(work)) {
+			t.Fatalf("workspace removal failure: err=%v output=%q work=%q readErr=%v", err, output, work, readErr)
+		}
+	})
 }
 
 func waitForPath(t *testing.T, path string) {

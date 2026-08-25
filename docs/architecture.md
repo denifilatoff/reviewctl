@@ -2,8 +2,6 @@
 
 Status: Accepted MVP design
 
-Last updated: 2026-08-20
-
 ## Purpose
 
 `reviewctl` schedules Codex reviews of GitHub pull requests on one trusted laptop. It polls configured repositories,
