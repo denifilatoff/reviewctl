@@ -148,7 +148,8 @@ func assertLiveCallOrder(t *testing.T, path string) {
 	}
 	want := strings.Join([]string{
 		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head", "gh markers",
-		"reviewctl baseline", "sqlite baseline", "reviewctl enqueue", "reviewctl safe failure",
+		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
+		"reviewctl enqueue", "reviewctl safe failure",
 		"sqlite retry history", "sqlite retry queue", "reviewctl first success", "gh markers", "gh head readback",
 		"reviewctl enqueue", "reviewctl recovery", "gh markers", "gh head readback", "sqlite history",
 		"sqlite successes", "sqlite failures", "sqlite queue",
@@ -238,10 +239,10 @@ func helperLiveSQLite(args []string) {
 		appendLiveCall("sqlite baseline")
 		fmt.Println("1")
 	case "SELECT COUNT(*) FROM history;":
-		if runs == 2 {
+		if runs == 3 {
 			appendLiveCall("sqlite retry history")
 			fmt.Println("1")
-		} else if runs == 4 {
+		} else if runs == 5 {
 			appendLiveCall("sqlite history")
 			fmt.Println("3")
 		} else {
@@ -255,9 +256,12 @@ func helperLiveSQLite(args []string) {
 		fmt.Println("1")
 	case "SELECT COUNT(*) FROM queue;":
 		if runs == 2 {
+			appendLiveCall("sqlite unchanged discovery queue")
+			fmt.Println("0")
+		} else if runs == 3 {
 			appendLiveCall("sqlite retry queue")
 			fmt.Println("1")
-		} else if runs == 4 {
+		} else if runs == 5 {
 			appendLiveCall("sqlite queue")
 			fmt.Println("0")
 		} else {
@@ -287,10 +291,13 @@ func helperLiveReviewctl(args []string) {
 		appendLiveCall("reviewctl baseline")
 		fmt.Println(`{"command":"run","status":"success","discovery_succeeded":1,"queued":0,"attempted":0}`)
 	case 1:
+		appendLiveCall("reviewctl unchanged discovery")
+		fmt.Println(`{"command":"run","status":"success","discovery_succeeded":1,"enqueued":0,"queued":0,"attempted":0}`)
+	case 2:
 		appendLiveCall("reviewctl safe failure")
 		fmt.Println(`{"command":"run","status":"failed","error":{"code":"publication_disabled"}}`)
 		os.Exit(1)
-	case 2:
+	case 3:
 		appendLiveCall("reviewctl first success")
 		recovered := readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")) == 1
 		if !recovered {
@@ -299,7 +306,7 @@ func helperLiveReviewctl(args []string) {
 			}
 		}
 		fmt.Printf("{\"command\":\"run\",\"verdict\":\"COMMENT\",\"recovered\":%t}\n", recovered)
-	case 3:
+	case 4:
 		appendLiveCall("reviewctl recovery")
 		fmt.Println(`{"command":"run","verdict":"COMMENT","recovered":true}`)
 	default:
