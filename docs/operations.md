@@ -41,11 +41,29 @@ trusted_authors:
 
 repositories:
   - provider: github
-    repository: <owner>/<repository>
+    repository: <owner>/<repository-one>
+  - provider: github
+    repository: <owner>/<repository-two>
 ```
 
 Only `github` and `codex` are valid values. `attempt_timeout` is optional, defaults to `1h`, and must be greater than
-zero and no more than `24h`.
+zero and no more than `24h`. `trusted_authors` applies to every configured repository. Only pull requests from those
+GitHub logins may reach Codex.
+
+## Run in production on macOS
+
+Keep `publish: false` while setting up a production schedule.
+
+1. Save every repository and trusted pull request author in `~/.config/reviewctl/config.yaml`.
+2. Run `reviewctl doctor` and resolve every failed prerequisite.
+3. Run `reviewctl --json run` once. The first successful discovery records the open pull requests as a baseline and
+   does not queue them.
+4. Add any existing pull requests that still need review with `reviewctl review` or `reviewctl bulk-review`.
+5. Change `publish` to `true`, run `reviewctl doctor` again, then run `reviewctl --json run` once manually.
+6. Follow [Schedule with launchd](#schedule-with-launchd). Confirm that the plist `PATH` contains the directories for
+   `reviewctl`, `gh`, `codex`, and `apm`.
+
+Later scheduled runs queue new ready pull requests, draft-to-ready transitions, and head changes.
 
 ## Check prerequisites
 
