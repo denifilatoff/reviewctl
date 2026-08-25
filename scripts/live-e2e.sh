@@ -91,6 +91,20 @@ if [ "$baseline_count" -ne 1 ]; then
   exit 1
 fi
 
+"$binary" --json run >"$work/unchanged-discovery.json"
+if ! grep -q '"discovery_succeeded":1' "$work/unchanged-discovery.json" ||
+    ! grep -q '"enqueued":0' "$work/unchanged-discovery.json" ||
+    ! grep -q '"queued":0' "$work/unchanged-discovery.json" ||
+    ! grep -q '"attempted":0' "$work/unchanged-discovery.json"; then
+  echo "unchanged discovery was not a no-op" >&2
+  exit 1
+fi
+unchanged_queue=$(sqlite3 "$work/state/reviewctl/reviewctl.db" 'SELECT COUNT(*) FROM queue;')
+if [ "$unchanged_queue" -ne 0 ]; then
+  echo "unchanged discovery left queued work: queue=$unchanged_queue" >&2
+  exit 1
+fi
+
 "$binary" --json review "$pr_url" >"$work/enqueue-retry.json"
 if "$binary" --json run >"$work/run-retry.json"; then
   echo "publication-disabled retry unexpectedly succeeded" >&2
