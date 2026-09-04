@@ -7,4 +7,4 @@ targets:
 
 dependencies:
   apm:
-    - Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#f6a4ab833c3cb7eea45c174cb4d9ba7fe3c2e416
+    - Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#86740827df65b3447135d7af13a42c8076069153
