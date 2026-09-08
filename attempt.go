@@ -44,7 +44,7 @@ type DiscussionOutcome struct {
 }
 
 func codexExecArgs(workspace, receiptPath string) []string {
-	return []string{"exec", "--ephemeral", "--approve-for-me", "--color", "never", "--cd", workspace,
+	return []string{"exec", "--approve-for-me", "--color", "never", "--cd", workspace,
 		"--skip-git-repo-check", "-o", receiptPath, "-"}
 }
 
@@ -105,7 +105,7 @@ func HashSkills(root string) (string, error) {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Attempt) {
+func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullRequest) (result Attempt) {
 	result = Attempt{PullRequest: pr, StartedAt: time.Now().UTC()}
 	defer func() { result.FinishedAt = time.Now().UTC() }()
 
@@ -167,18 +167,9 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 		setAttemptError(&result, fail("workspace_failed", "write trusted instruction: %v", err))
 		return result
 	}
-	if err := runCommand(ctx, workspace, strings.NewReader(instruction), "codex",
-		codexExecArgs(workspace, receiptPath)...); err != nil {
-		setAttemptError(&result, fail("codex_failed", "%v", err))
-		return result
-	}
-	final, err := resolveGitHub(ctx, pr)
+	result.Cost, err = runCodex(ctx, cfg, workspace, receiptPath, instruction)
 	if err != nil {
-		setAttemptError(&result, err)
-		return result
-	}
-	if final.HeadSHA != resolved.HeadSHA {
-		setAttemptError(&result, fail("head_changed", "pull request head changed during review"))
+		setAttemptError(&result, fail("codex_failed", "%v", err))
 		return result
 	}
 	receipt, err := readReceipt(receiptPath)
@@ -205,6 +196,18 @@ func ProcessAttempt(ctx context.Context, cfg Config, pr PullRequest) (result Att
 	result.ReviewID = string(receipt.ReviewID)
 	result.ReviewURL = receipt.ReviewURL
 	result.Recovered = receipt.Recovered
+	if err := store.queueSignature(result); err != nil {
+		setAttemptError(&result, fail("state_failed", "%v", err))
+		return result
+	}
+	final, err := resolveGitHub(ctx, pr)
+	if err != nil {
+		setAttemptError(&result, err)
+		return result
+	}
+	if final.HeadSHA != resolved.HeadSHA {
+		setAttemptError(&result, fail("head_changed", "pull request head changed during review"))
+	}
 	return result
 }
 
@@ -351,6 +354,9 @@ event. Map a GitHub COMMENTED event to COMMENT even if the review body recommend
 unrelated GitHub state. Write only one JSON object as the final response with provider, repository, number, head_sha,
 skill_digest, verdict, review_id, review_url, recovered, and discussion_outcomes fields. The Codex CLI writes that final
 response to the receipt path.
+Before your final response, wait for every native subagent and nested descendant to finish.
+Do not launch separate Codex processes: use native subagents so request usage can be accounted for.
+Do not add a model or cost signature. The controller appends it after all model requests finish.
 `, pr.Provider, pr.Repository, pr.Number, pr.URL, head, digest, source, marker, receipt, ownedDiscussions)
 }
 
@@ -374,6 +380,7 @@ func readReceipt(path string) (Receipt, error) {
 }
 
 func setAttemptError(attempt *Attempt, err error) {
+	attempt.Success = false
 	attempt.ErrorCode = "operational_failure"
 	attempt.ErrorMessage = err.Error()
 	if coded, ok := err.(*codedError); ok {

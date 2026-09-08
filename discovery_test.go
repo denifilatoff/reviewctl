@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -98,6 +100,61 @@ func TestStoreRemembersAnEmptyFirstObservation(t *testing.T) {
 	ready := discoverySnapshot(repository.Repository, 1, "a", false)
 	if enqueued, err := store.ApplyDiscoverySnapshot(context.Background(), repository, []pullRequestSnapshot{ready}); err != nil || enqueued != 1 {
 		t.Fatalf("later snapshot: enqueued=%d err=%v", enqueued, err)
+	}
+}
+
+func TestDiscoveryDoesNotQueueNewUntrustedAuthor(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_DIR", discoveryDir)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	store := openTestStore(t)
+	cfg := Config{TrustedAuthors: []string{"alice"}, Repositories: []Repository{repository}}
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, nil)
+	discoverRepositories(context.Background(), cfg, store)
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{{
+		URL: "https://github.com/acme/service/pull/1", Number: 1, State: "OPEN", HeadRefOID: "a",
+		Author: fakeDiscoveryAuthor{Login: "mallory"},
+	}})
+
+	result := discoverRepositories(context.Background(), cfg, store)
+	if len(result) != 1 || result[0].Status != "success" || result[0].Observed != 1 || result[0].Enqueued != 0 {
+		t.Fatalf("untrusted discovery = %+v", result)
+	}
+}
+
+func TestDiscoveryQueuesPullRequestAfterAuthorBecomesTrusted(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_DIR", discoveryDir)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	store := openTestStore(t)
+	pullRequest := fakeDiscoveryPR{
+		URL: "https://github.com/acme/service/pull/1", Number: 1, State: "OPEN", HeadRefOID: "a",
+		Author: fakeDiscoveryAuthor{Login: "mallory"},
+	}
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{pullRequest})
+	discoverRepositories(context.Background(), Config{
+		TrustedAuthors: []string{"alice"}, Repositories: []Repository{repository},
+	}, store)
+
+	result := discoverRepositories(context.Background(), Config{
+		TrustedAuthors: []string{"mallory"}, Repositories: []Repository{repository},
+	}, store)
+	if len(result) != 1 || result[0].Status != "success" || result[0].Enqueued != 1 {
+		t.Fatalf("trusted discovery = %+v", result)
 	}
 }
 

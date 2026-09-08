@@ -286,7 +286,7 @@ func TestMainInitCreatesPathsWithoutOverwritingConfig(t *testing.T) {
 	config, _ := configPath()
 	state, _ := statePath()
 	data, err := os.ReadFile(config)
-	if err != nil || len(data) == 0 {
+	if err != nil || !bytes.Contains(data, []byte("model: gpt-5.6-sol\nreasoning_effort: medium\n")) {
 		t.Fatalf("config was not created: bytes = %q, err = %v", data, err)
 	}
 	if _, err := os.Stat(state); err != nil {

@@ -82,6 +82,8 @@ Configuration lives at `$XDG_CONFIG_HOME/reviewctl/config.yaml`, or `~/.config/r
 
 ```yaml
 harness: codex
+model: gpt-5.6-sol
+reasoning_effort: medium
 publish: true
 attempt_timeout: 1h
 
@@ -113,13 +115,13 @@ The implementation decodes YAML directly. It does not use a configuration preced
 
 ## Discovery baseline
 
-The baseline records the last observed state of each open pull request in each configured repository. It is not a job
-queue or execution history.
+The baseline records the last observed state of each open pull request from a trusted author in each configured
+repository. It is not a job queue or execution history.
 
 The first successful poll of a repository establishes its baseline:
 
-- Existing ready pull requests are recorded without being queued.
-- Existing drafts are recorded so a later ready transition can be detected.
+- Existing eligible pull requests are recorded without being queued.
+- Existing drafts from trusted authors are recorded so a later ready transition can be detected.
 
 Later polls enqueue a pull request when:
 
@@ -130,11 +132,12 @@ Later polls enqueue a pull request when:
 The fetched GitHub snapshot is obtained outside a database transaction. Queue inserts and the corresponding baseline
 update use one short SQLite transaction, so a crash cannot advance the baseline without recording the work.
 
-Discovery requests a 1,001-item sentinel through `gh`. A repository with more than 1,000 open pull requests fails
-discovery without changing its baseline or queue; supporting that repository requires pagination.
+Discovery requests each pull request's author and a 1,001-item sentinel through `gh`. Pull requests from untrusted
+authors do not enter the baseline or queue. A repository with more than 1,000 open pull requests fails discovery
+without changing its baseline or queue; supporting that repository requires pagination.
 
-A skill or trust-list change does not enqueue every open pull request. The user may enqueue selected pull requests
-explicitly.
+A skill change does not enqueue every open pull request. Adding an author to `trusted_authors` makes that author's
+ready pull requests eligible on the next poll. The user may also enqueue selected pull requests explicitly.
 
 ## Review queue
 
@@ -157,13 +160,15 @@ the latest revision needs review.
 One `run` invocation reads a queue snapshot and processes every entry in that snapshot at most once, in deterministic
 insertion order. Entries added after the snapshot wait for the next invocation.
 
-On confirmed success, `run` records history and deletes the pull request from the queue in one transaction. On failure,
-it records the error and leaves the pull request queued. The operating-system schedule supplies the retry cadence; the
-MVP has no retry loop, backoff policy, or retry counter.
+`run` records history and updates the queue in one transaction. A confirmed success or an eligibility rejection
+(`untrusted_author`, `pr_not_open`, or `pr_draft`) removes the pull request. Other failures leave it queued. Discovery
+can queue the pull request again after its author becomes trusted, it is reopened, or its draft status changes. The
+operating-system schedule supplies the retry cadence; the MVP has no retry loop, backoff policy, or retry counter.
 
 This model provides crash recovery without a running state. A pull request remains queued until success. If Codex
-publishes a review and the process exits before deleting the entry, the next run recovers the existing review through
-its marker and readback instead of publishing a duplicate.
+publishes a review, its accounting signature is queued before the final head check and history write. If the process
+then exits, the next run recovers the existing review through its marker and readback instead of publishing a duplicate,
+and the saved signature is delivered without replacing its original accounting.
 
 ## History
 
@@ -235,7 +240,7 @@ The execution path is linear:
 6. Run Codex. The instruction requires Codex to check the marker, publish when needed, and read the review back.
 7. Validate the receipt and current head.
 8. Remove the entire workspace.
-9. Record history, then remove the queue entry only after confirmed success.
+9. Record history, then remove the queue entry after confirmed success or an eligibility rejection.
 
 `APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
 valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
@@ -378,7 +383,8 @@ or `~/.cache`. The lock falls back to the state directory when no runtime direct
 - Only one `run` process consumes the queue.
 - Producer and status commands remain available while `run` is active.
 - The queue contains one entry per pull request.
-- A queue entry is deleted only after confirmed success or recovery of an existing published review.
+- A queue entry is deleted after confirmed success, recovery of an existing published review, or an eligibility
+  rejection.
 - Every failed Codex execution writes bounded history and leaves the pull request queued.
 - Discovery updates the baseline and queue atomically.
 - No database transaction remains open during external commands.

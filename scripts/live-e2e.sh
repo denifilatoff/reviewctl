@@ -61,22 +61,12 @@ write_config false
 export XDG_CONFIG_HOME="$work/config"
 export XDG_STATE_HOME="$work/state"
 
-marker_prefix="<!-- reviewctl:github:denifilatoff/reviewctl#24:$head:"
 count_markers() {
+  marker="<!-- reviewctl:github:denifilatoff/reviewctl#24:$head:$1 -->"
   marker_ids=$(gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
-    --jq ".[] | select(.body != null and (.body | contains(\"$marker_prefix\"))) | .id") || return 1
+    --jq ".[] | select(.body != null and (.body | contains(\"$marker\"))) | .id") || return 1
   printf '%s\n' "$marker_ids" | awk 'NF { count++ } END { print count + 0 }'
 }
-
-before_count=$(count_markers)
-case "$before_count" in
-  0) mode=publication ;;
-  1) mode=recovery ;;
-  *)
-    echo "unsafe live fixture: expected at most one exact review marker for head $head, found $before_count" >&2
-    exit 1
-    ;;
-esac
 
 "$binary" --json run >"$work/baseline.json"
 if ! grep -q '"discovery_succeeded":1' "$work/baseline.json" ||
@@ -123,17 +113,19 @@ fi
 
 write_config true
 "$binary" --json run >"$work/run-1.json"
-first_count=$(count_markers)
+skill_digest=$(sqlite3 "$work/state/reviewctl/reviewctl.db" \
+  "SELECT skill_digest FROM history WHERE success = 1 ORDER BY id DESC LIMIT 1;")
+first_count=$(count_markers "$skill_digest")
 if [ "$first_count" -ne 1 ] || ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
   echo "first successful run did not read back exactly one COMMENT review" >&2
   exit 1
 fi
-if [ "$mode" = publication ] && ! grep -q '"recovered":false' "$work/run-1.json"; then
-  echo "zero-marker run did not publish a new review" >&2
-  exit 1
-fi
-if [ "$mode" = recovery ] && ! grep -q '"recovered":true' "$work/run-1.json"; then
-  echo "existing-marker run did not recover the review" >&2
+if grep -q '"recovered":false' "$work/run-1.json"; then
+  mode=publication
+elif grep -q '"recovered":true' "$work/run-1.json"; then
+  mode=recovery
+else
+  echo "first successful run did not report publication or recovery" >&2
   exit 1
 fi
 if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; then
@@ -143,7 +135,7 @@ fi
 
 "$binary" --json review "$pr_url" >"$work/enqueue-2.json"
 "$binary" --json run >"$work/run-2.json"
-second_count=$(count_markers)
+second_count=$(count_markers "$skill_digest")
 if [ "$second_count" -ne 1 ] || ! grep -q '"recovered":true' "$work/run-2.json" ||
     ! grep -q '"verdict":"COMMENT"' "$work/run-2.json"; then
   echo "second run did not recover the existing marker without a duplicate" >&2

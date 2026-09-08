@@ -999,7 +999,7 @@ repositories:
 	}
 	defer store.Close()
 	queue, history, _ := store.Status(context.Background(), 3)
-	if len(queue) != 1 || queue[0].Number != 8 || len(history) != 3 || history[0].ErrorCode != "untrusted_author" {
+	if len(queue) != 0 || len(history) != 3 || history[0].ErrorCode != "untrusted_author" {
 		t.Fatalf("unexpected durable state: queue=%+v history=%+v", queue, history)
 	}
 
@@ -1007,17 +1007,24 @@ repositories:
 	if result.exitCode != 0 {
 		t.Fatalf("enqueue moving-head fixture: %+v", result)
 	}
+	if err := os.Remove(filepath.Join(temp, "published")); err != nil {
+		t.Fatal(err)
+	}
 	headChangeEnv := append(append([]string{}, env...),
-		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"),
-		"REVIEWCTL_FAKE_RECEIPT_HEAD=fedcba9876543210fedcba9876543210fedcba98")
+		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
 	result = runCLI(t, headChangeEnv, binary, "--json", "run")
 	if result.exitCode != 1 || !strings.Contains(result.stdout, `"code":"head_changed"`) {
 		t.Fatalf("moving head result: %+v", result)
 	}
 	queue, history, err = store.Status(context.Background(), 1)
-	if err != nil || len(queue) != 2 || queue[1].Number != 7 || len(history) != 1 ||
+	if err != nil || len(queue) != 1 || queue[0].Number != 7 || len(history) != 1 ||
 		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
 		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
+	}
+	reviewData, err := os.ReadFile(filepath.Join(temp, "published.review.json"))
+	var review submittedReview
+	if err != nil || json.Unmarshal(reviewData, &review) != nil || !strings.Contains(review.Body, signatureStart) {
+		t.Fatalf("moving-head review lost accounting signature: %s %v", reviewData, err)
 	}
 }
 
@@ -1141,7 +1148,7 @@ func TestGitHubDiscoverySentinelPreservesBaseline(t *testing.T) {
 	}
 	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{first})
 	store := openTestStore(t)
-	cfg := Config{Repositories: []Repository{repository}}
+	cfg := Config{TrustedAuthors: []string{"dependabot[bot]"}, Repositories: []Repository{repository}}
 	result := discoverRepositories(context.Background(), cfg, store)
 	if len(result) != 1 || result[0].Status != "success" || result[0].Observed != 1 || result[0].Enqueued != 0 {
 		t.Fatalf("first discovery = %+v", result)
@@ -1196,11 +1203,16 @@ func writeDiscoveryFixture(t *testing.T, dir, repository, body string) {
 }
 
 type fakeDiscoveryPR struct {
-	URL        string `json:"url"`
-	Number     int64  `json:"number"`
-	State      string `json:"state"`
-	IsDraft    bool   `json:"isDraft"`
-	HeadRefOID string `json:"headRefOid"`
+	URL        string              `json:"url"`
+	Number     int64               `json:"number"`
+	State      string              `json:"state"`
+	IsDraft    bool                `json:"isDraft"`
+	HeadRefOID string              `json:"headRefOid"`
+	Author     fakeDiscoveryAuthor `json:"author"`
+}
+
+type fakeDiscoveryAuthor struct {
+	Login string `json:"login"`
 }
 
 func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fakeDiscoveryPR) {
@@ -1236,9 +1248,15 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 				Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 				Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 			}
-			result := ProcessAttempt(context.Background(), cfg, pr)
+			store := openTestStore(t)
+			result := ProcessAttempt(context.Background(), cfg, store, pr)
 			if test.wantError == "" && (!result.Success || result.Verdict != "COMMENT") {
 				t.Fatalf("self-authored COMMENT failed: %+v", result)
+			}
+			var pending int
+			if err := store.db.QueryRow(`SELECT count(*) FROM review_signatures`).Scan(&pending); err != nil ||
+				pending != map[bool]int{true: 1, false: 0}[test.wantError == ""] {
+				t.Fatalf("durable signature before Finish: pending=%d err=%v", pending, err)
 			}
 			if test.wantError != "" && (result.Success || result.ErrorCode != test.wantError) {
 				t.Fatalf("ordinary COMMENT result: %+v", result)
@@ -1575,6 +1593,34 @@ func helperGH(args []string) {
 		})
 		return
 	}
+	for _, arg := range args {
+		if strings.Contains(arg, "/reviews/") {
+			path := os.Getenv("REVIEWCTL_FAKE_STATE") + ".review.json"
+			data, err := os.ReadFile(path)
+			if err != nil {
+				os.Exit(76)
+			}
+			var review submittedReview
+			if json.Unmarshal(data, &review) != nil {
+				os.Exit(76)
+			}
+			if len(args) > 2 && args[1] == "--method" && args[2] == "PUT" {
+				var body struct {
+					Body string `json:"body"`
+				}
+				if json.NewDecoder(os.Stdin).Decode(&body) != nil {
+					os.Exit(76)
+				}
+				review.Body = body.Body
+				data, _ = json.Marshal(review)
+				if os.WriteFile(path, data, 0o600) != nil {
+					os.Exit(76)
+				}
+			}
+			os.Stdout.Write(data)
+			return
+		}
+	}
 	rawTarget := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
 	rawView := rawTarget == "view" && len(args) == 5 && args[0] == "pr" && args[1] == "view" &&
 		args[2] == "https://github.com/acme/service/pull/7" &&
@@ -1608,7 +1654,7 @@ func helperGH(args []string) {
 	}
 	if len(args) == 10 && args[0] == "pr" && args[1] == "list" && args[2] == "--repo" &&
 		args[4] == "--state" && args[5] == "open" && args[6] == "--limit" && args[7] == "1001" &&
-		args[8] == "--json" && args[9] == "url,number,state,isDraft,headRefOid" {
+		args[8] == "--json" && args[9] == "url,number,state,isDraft,headRefOid,author" {
 		repository := args[3]
 		if ready := os.Getenv("REVIEWCTL_FAKE_DISCOVERY_READY"); ready != "" {
 			if os.WriteFile(ready, nil, 0o600) != nil {
@@ -1642,7 +1688,16 @@ func helperGH(args []string) {
 		if err != nil {
 			os.Exit(87)
 		}
-		os.Stdout.Write(data)
+		var snapshot []fakeDiscoveryPR
+		if json.Unmarshal(data, &snapshot) != nil {
+			os.Exit(87)
+		}
+		for i := range snapshot {
+			if snapshot[i].Author.Login == "" {
+				snapshot[i].Author.Login = "dependabot[bot]"
+			}
+		}
+		json.NewEncoder(os.Stdout).Encode(snapshot)
 		return
 	}
 	if len(args) == 4 && args[0] == "api" && args[1] == "user" && args[2] == "--jq" && args[3] == ".login" {
@@ -1681,6 +1736,10 @@ func helperGH(args []string) {
 		number := int64(7)
 		author := "dependabot[bot]"
 		head := "0123456789abcdef0123456789abcdef01234567"
+		state := os.Getenv("REVIEWCTL_FAKE_PR_STATE")
+		if state == "" {
+			state = "OPEN"
+		}
 		if strings.HasSuffix(args[2], "/8") {
 			number, author = 8, "mallory"
 		}
@@ -1697,7 +1756,7 @@ func helperGH(args []string) {
 			}
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
-			"url": args[2], "number": number, "state": "OPEN", "isDraft": false,
+			"url": args[2], "number": number, "state": state, "isDraft": os.Getenv("REVIEWCTL_FAKE_PR_DRAFT") != "",
 			"headRefOid": head, "author": map[string]string{"login": author},
 		})
 		return
@@ -1774,13 +1833,27 @@ func helperCodex(args []string) {
 		fmt.Println("Logged in")
 		return
 	}
-	if len(args) != 11 || args[0] != "exec" || args[1] != "--ephemeral" || args[2] != "--approve-for-me" ||
-		args[3] != "--color" || args[4] != "never" || args[5] != "--cd" || args[6] == "" ||
-		args[7] != "--skip-git-repo-check" || args[8] != "-o" || args[9] == "" || args[10] != "-" {
+	jsonMode := false
+	var filtered []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--json" {
+			jsonMode = true
+			continue
+		}
+		if args[i] == "-c" || args[i] == "--model" {
+			i++
+			continue
+		}
+		filtered = append(filtered, args[i])
+	}
+	args = filtered
+	if len(args) != 10 || args[0] != "exec" || args[1] != "--approve-for-me" ||
+		args[2] != "--color" || args[3] != "never" || args[4] != "--cd" || args[5] == "" ||
+		args[6] != "--skip-git-repo-check" || args[7] != "-o" || args[8] == "" || args[9] != "-" {
 		fmt.Fprintln(os.Stderr, "Codex attempt arguments are incompatible")
 		os.Exit(2)
 	}
-	if args[6] == os.TempDir() && args[9] == os.DevNull {
+	if args[5] == os.TempDir() && args[8] == os.DevNull {
 		appendDoctorCodexCall("probe")
 		input, err := io.ReadAll(os.Stdin)
 		if err != nil || len(input) != 0 {
@@ -1868,8 +1941,22 @@ func helperCodex(args []string) {
 		receipt.HeadSHA = head
 	}
 	data, _ := json.Marshal(receipt)
+	if !recovered {
+		review := submittedReview{ID: 123, Body: "Review findings\n\n" + fields["Idempotency marker"], Commit: receipt.HeadSHA, URL: receipt.ReviewURL}
+		review.User.Login = "reviewer"
+		if login := os.Getenv("REVIEWCTL_FAKE_LOGIN"); login != "" {
+			review.User.Login = login
+		}
+		payload, _ := json.Marshal(review)
+		os.WriteFile(state+".review.json", payload, 0o600)
+	}
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
 	}
-	os.Stdout.Write(data)
+	if jsonMode {
+		fmt.Println(`{"type":"thread.started","thread_id":"fake-root"}`)
+		fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}`)
+	} else {
+		os.Stdout.Write(data)
+	}
 }

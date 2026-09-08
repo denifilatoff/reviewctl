@@ -11,6 +11,8 @@ reviewctl --help
 ```
 
 `reviewctl` requires authenticated GitHub CLI (`gh`), Codex CLI, and APM.
+For review cost estimates, install [ccusage](https://ccusage.com/guide/) 20.0.19 or later within the 20.x series.
+No telemetry collector is required.
 
 See the [operations guide](docs/operations.md) to configure repositories and run `reviewctl` on macOS.
 
