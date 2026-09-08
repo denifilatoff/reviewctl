@@ -30,7 +30,7 @@ type Repository struct {
 }
 
 func DecodeConfig(r io.Reader) (Config, error) {
-	cfg := Config{AttemptTimeout: time.Hour}
+	cfg := Config{Model: "gpt-6-astra", ReasoningEffort: "low", AttemptTimeout: time.Hour}
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -94,8 +94,8 @@ func statePath() (string, error) {
 func cachePath() (string, error) { return defaultPath("XDG_CACHE_HOME", ".cache", "") }
 
 const initialConfig = `harness: codex
-model: gpt-5.6-sol
-reasoning_effort: medium
+model: gpt-6-astra
+reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 trusted_authors: []

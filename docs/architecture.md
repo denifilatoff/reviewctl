@@ -82,8 +82,8 @@ Configuration lives at `$XDG_CONFIG_HOME/reviewctl/config.yaml`, or `~/.config/r
 
 ```yaml
 harness: codex
-model: gpt-5.6-sol
-reasoning_effort: medium
+model: gpt-6-astra
+reasoning_effort: low
 publish: true
 attempt_timeout: 1h
 

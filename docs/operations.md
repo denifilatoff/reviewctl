@@ -33,8 +33,8 @@ publishing reviews.
 
 ```yaml
 harness: codex
-model: gpt-5.6-sol
-reasoning_effort: medium
+model: gpt-6-astra
+reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 
@@ -57,13 +57,13 @@ GitHub logins may reach Codex.
 Set the review model and reasoning effort with these settings:
 
 ```yaml
-model: gpt-5.6-sol
-reasoning_effort: medium
+model: gpt-6-astra
+reasoning_effort: low
 ```
 
-The generated configuration selects `gpt-5.6-sol` and `medium`. Existing configurations may omit either setting to
-inherit the current Codex default. Codex validates whether a selected model supports the configured effort. History
-records both the requested settings and the model and effort observed in the session logs.
+ReviewCTL defaults to `gpt-6-astra` and `low` when either setting is omitted. Codex validates whether a selected model
+supports the configured effort. History records both the requested settings and the model and effort observed in the
+session logs.
 
 Install [ccusage](https://ccusage.com/guide/) version 20.0.19 or newer within 20.x and put it on the same `PATH` as
 `reviewctl`. Cost estimation uses `ccusage codex session --json --no-offline`, with only the review's session logs
@@ -72,7 +72,7 @@ longer ephemeral: logs remain in the normal Codex home, which may contain review
 accounting copies are removed after calculation. Do not remove active logs before the review finishes.
 
 After the model finishes, the controller adds one line to the GitHub review, for example
-`Model: gpt-5.6-sol medium (~$0.1)`. Model and reasoning effort come from the primary agent's session.
+`Model: gpt-6-astra low (~$0.1)`. Model and reasoning effort come from the primary agent's session.
 The displayed amount is rounded to one decimal place; history keeps full precision.
 The amount includes native subagents, using ccusage's token and inherited-history accounting. It is an
 API-equivalent estimate, not a subscription charge or a billing statement. Internet prices come from ccusage's

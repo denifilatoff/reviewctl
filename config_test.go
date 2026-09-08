@@ -100,7 +100,7 @@ func TestDecodeConfigUsesBoundedAttemptTimeout(t *testing.T) {
 		t.Fatalf("configured timeout = %s, err = %v", cfg.AttemptTimeout, err)
 	}
 	cfg, err = DecodeConfig(strings.NewReader(config("")))
-	if err != nil || cfg.AttemptTimeout != time.Hour || cfg.Model != "" || cfg.ReasoningEffort != "" {
+	if err != nil || cfg.AttemptTimeout != time.Hour || cfg.Model != "gpt-6-astra" || cfg.ReasoningEffort != "low" {
 		t.Fatalf("defaults = timeout %s, model %q, effort %q, err = %v",
 			cfg.AttemptTimeout, cfg.Model, cfg.ReasoningEffort, err)
 	}
