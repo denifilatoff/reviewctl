@@ -340,6 +340,10 @@ Publish: true
 Idempotency marker: %s
 Receipt path: %s
 Pre-existing owned discussion thread IDs: %s
+GitHub publication is already authorized. If the GitHub integration cannot publish, use gh api.
+Set sandbox_permissions=require_escalated for GitHub CLI API commands. Do not use sandboxed gh auth status to
+diagnose credentials because macOS Keychain is unavailable there.
+Do not use a browser fallback. Do not ask for another publication confirmation.
 Before publishing, verify the current head and search submitted reviews for the exact marker. If it exists, read it back;
 otherwise, perform the review and publish exactly one APPROVE or REQUEST_CHANGES review.
 Synchronize every listed discussion according to the installed skill before returning, including during marker recovery.
