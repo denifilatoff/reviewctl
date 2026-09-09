@@ -1,16 +1,50 @@
 lockfile_version: '1'
-generated_at: '2026-09-04T09:06:57.012587+00:00'
-apm_version: 0.28.0
+generated_at: '2026-09-09T09:35:33.837834+00:00'
+apm_version: 0.30.0
 dependencies:
 - repo_url: netcracker/qubership-ai-packages
   materialization_repo_url: Netcracker/qubership-ai-packages
   name: adversarial-code-review
   host: github.com
-  resolved_commit: 86740827df65b3447135d7af13a42c8076069153
-  resolved_ref: 86740827df65b3447135d7af13a42c8076069153
-  version: 1.0.1
+  resolved_commit: 38e3303bfdddec9f2b1be923033af8b5a9ae80d0
+  resolved_ref: 38e3303bfdddec9f2b1be923033af8b5a9ae80d0
+  version: 1.0.2
   virtual_path: agent-packages/adversarial-code-review
   is_virtual: true
   package_type: apm_package
-  content_hash: sha256:4d95bf64f8cc123fe519decee4c2b2e9106b0731fd91bc2dda63564a9fa04f7b
-deployments: []
+  deployed_files:
+  - .agents/skills/adversarial-code-review
+  - .agents/skills/adversarial-code-review/SKILL.md
+  - .agents/skills/adversarial-code-review/references/gitlab.md
+  deployed_file_hashes:
+    .agents/skills/adversarial-code-review/SKILL.md: sha256:bf60ba8985d5dcbfb6c4c473495b00a3326cdd2a4f91d201608b39d9cebf9391
+    .agents/skills/adversarial-code-review/references/gitlab.md: sha256:34bc03b94e2de6261a4abe91a5d84eee1dc942f4ccaef2c389d09777fa9f7a69
+  content_hash: sha256:18cb335fb5a77c3e1f669d64ce3c32dba6a69c5d891473c7c4d3c6f182d7b1c5
+deployments:
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: sha256:bf60ba8985d5dcbfb6c4c473495b00a3326cdd2a4f91d201608b39d9cebf9391
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review/references/gitlab.md
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: sha256:34bc03b94e2de6261a4abe91a5d84eee1dc942f4ccaef2c389d09777fa9f7a69
