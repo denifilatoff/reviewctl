@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,17 +16,18 @@ type Store struct{ db *sql.DB }
 
 type Attempt struct {
 	PullRequest
-	HeadSHA      string    `json:"head_sha,omitempty"`
-	SkillDigest  string    `json:"skill_digest,omitempty"`
-	StartedAt    time.Time `json:"started_at"`
-	FinishedAt   time.Time `json:"finished_at"`
-	Success      bool      `json:"success"`
-	Verdict      string    `json:"verdict,omitempty"`
-	ReviewID     string    `json:"review_id,omitempty"`
-	ReviewURL    string    `json:"review_url,omitempty"`
-	Recovered    bool      `json:"recovered,omitempty"`
-	ErrorCode    string    `json:"error_code,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
+	Cost         *ReviewCost `json:"cost,omitempty"`
+	HeadSHA      string      `json:"head_sha,omitempty"`
+	SkillDigest  string      `json:"skill_digest,omitempty"`
+	StartedAt    time.Time   `json:"started_at"`
+	FinishedAt   time.Time   `json:"finished_at"`
+	Success      bool        `json:"success"`
+	Verdict      string      `json:"verdict,omitempty"`
+	ReviewID     string      `json:"review_id,omitempty"`
+	ReviewURL    string      `json:"review_url,omitempty"`
+	Recovered    bool        `json:"recovered,omitempty"`
+	ErrorCode    string      `json:"error_code,omitempty"`
+	ErrorMessage string      `json:"error_message,omitempty"`
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -71,6 +73,13 @@ func OpenStore(path string) (*Store, error) {
 			repository TEXT NOT NULL,
 			PRIMARY KEY(provider, repository)
 		)`,
+		`CREATE TABLE IF NOT EXISTS review_signatures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			review_id TEXT NOT NULL UNIQUE,
+			attempt TEXT NOT NULL,
+			error_message TEXT NOT NULL DEFAULT '',
+			attempted_at INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,
@@ -83,6 +92,32 @@ func OpenStore(path string) (*Store, error) {
 		if _, err := db.Exec(statement); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("initialize state: %w", err)
+		}
+	}
+	var exists int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = 'cost_json'`).Scan(&exists); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("inspect history schema: %w", err)
+	}
+	if exists == 0 {
+		if _, err := db.Exec(`ALTER TABLE history ADD COLUMN cost_json TEXT NOT NULL DEFAULT ''`); err != nil {
+			// Concurrent readers may have applied the same additive migration.
+			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = 'cost_json'`).Scan(&exists); checkErr != nil || exists == 0 {
+				db.Close()
+				return nil, fmt.Errorf("migrate history: %w", err)
+			}
+		}
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("inspect signature schema: %w", err)
+	}
+	if exists == 0 {
+		if _, err := db.Exec(`ALTER TABLE review_signatures ADD COLUMN attempted_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); checkErr != nil || exists == 0 {
+				db.Close()
+				return nil, fmt.Errorf("migrate signature queue: %w", err)
+			}
 		}
 	}
 	return &Store{db: db}, nil
@@ -243,7 +278,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 	}
 	rows, err = tx.QueryContext(ctx, `
 		SELECT provider, repository, change_number, url, head_sha, skill_digest, started_at, finished_at,
-			success, verdict, review_id, review_url, error_code, error_message FROM history ORDER BY id DESC LIMIT ?`,
+			success, verdict, review_id, review_url, error_code, error_message, cost_json FROM history ORDER BY id DESC LIMIT ?`,
 		historyLimit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read history: %w", err)
@@ -251,14 +286,20 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 	history := make([]Attempt, 0)
 	for rows.Next() {
 		var attempt Attempt
-		var started, finished string
+		var started, finished, cost string
 		if err := rows.Scan(&attempt.Provider, &attempt.Repository, &attempt.Number, &attempt.URL, &attempt.HeadSHA,
 			&attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
-			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage); err != nil {
+			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage, &cost); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("read history entry: %w", err)
 		}
 		attempt.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		if cost != "" {
+			if err := json.Unmarshal([]byte(cost), &attempt.Cost); err != nil {
+				rows.Close()
+				return nil, nil, fmt.Errorf("decode accounting: %w", err)
+			}
+		}
 		attempt.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
 		history = append(history, attempt)
 	}
@@ -276,6 +317,10 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 }
 
 func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
+	cost, err := encodeCost(attempt.Cost)
+	if err != nil {
+		return fmt.Errorf("encode accounting: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("start attempt transaction: %w", err)
@@ -283,15 +328,32 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO history(provider, repository, change_number, url, head_sha, skill_digest,
-			started_at, finished_at, success, verdict, review_id, review_url, error_code, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, finished_at, success, verdict, review_id, review_url, error_code, error_message, cost_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		attempt.Provider, attempt.Repository, attempt.Number, attempt.URL, attempt.HeadSHA, attempt.SkillDigest,
 		attempt.StartedAt.UTC().Format(time.RFC3339Nano), attempt.FinishedAt.UTC().Format(time.RFC3339Nano),
 		attempt.Success, attempt.Verdict, attempt.ReviewID, attempt.ReviewURL, attempt.ErrorCode,
-		bounded(attempt.ErrorMessage, 512)); err != nil {
+		bounded(attempt.ErrorMessage, 512), cost); err != nil {
 		return fmt.Errorf("record attempt: %w", err)
 	}
+	removeFromQueue := attempt.Success
+	switch attempt.ErrorCode {
+	case "untrusted_author", "pr_not_open", "pr_draft":
+		removeFromQueue = true
+	}
 	if attempt.Success {
+		if attempt.Cost != nil && !attempt.Recovered {
+			payload, err := json.Marshal(attempt)
+			if err != nil {
+				return fmt.Errorf("encode signature: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO review_signatures(review_id, attempt) VALUES (?, ?)
+				ON CONFLICT(review_id) DO NOTHING`, attempt.ReviewID, string(payload)); err != nil {
+				return fmt.Errorf("queue signature: %w", err)
+			}
+		}
+	}
+	if removeFromQueue {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM queue WHERE provider = ? AND repository = ? AND change_number = ?`,
 			attempt.Provider, attempt.Repository, attempt.Number); err != nil {
 			return fmt.Errorf("remove queue entry: %w", err)
@@ -299,6 +361,23 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit attempt: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) queueSignature(attempt Attempt) error {
+	if attempt.Cost == nil || attempt.Recovered {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(attempt)
+	if err != nil {
+		return fmt.Errorf("encode signature: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO review_signatures(review_id, attempt) VALUES (?, ?)
+		ON CONFLICT(review_id) DO NOTHING`, attempt.ReviewID, string(payload)); err != nil {
+		return fmt.Errorf("queue signature: %w", err)
 	}
 	return nil
 }

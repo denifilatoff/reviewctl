@@ -214,3 +214,24 @@ func TestStoreFinishesAttemptsAtomically(t *testing.T) {
 		t.Fatalf("unexpected history: %+v err=%v", history, err)
 	}
 }
+
+func TestStoreDropsIneligibleAttemptFailures(t *testing.T) {
+	for _, code := range []string{"untrusted_author", "pr_not_open", "pr_draft"} {
+		t.Run(code, func(t *testing.T) {
+			store := openTestStore(t)
+			pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/1")
+			if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Finish(context.Background(), Attempt{
+				PullRequest: pr, StartedAt: time.Now(), FinishedAt: time.Now(), ErrorCode: code,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			queue, err := store.Snapshot(context.Background())
+			if err != nil || len(queue) != 0 {
+				t.Fatalf("queue = %+v, err = %v", queue, err)
+			}
+		})
+	}
+}

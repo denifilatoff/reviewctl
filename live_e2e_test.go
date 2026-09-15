@@ -76,7 +76,12 @@ func TestLiveE2EFailsClosedWhenMarkerReadFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "gh auth\ncodex login\ngh preflight\ngh REST author\ngh REST head\ngh markers\n"
+	want := strings.Join([]string{
+		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head",
+		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
+		"reviewctl enqueue", "reviewctl safe failure", "sqlite retry history", "sqlite retry queue",
+		"reviewctl doctor", "gh markers",
+	}, "\n") + "\n"
 	if string(data) != want {
 		t.Fatalf("helper calls after marker read failure:\n%s\nwant:\n%s", data, want)
 	}
@@ -147,10 +152,11 @@ func assertLiveCallOrder(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	want := strings.Join([]string{
-		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head", "gh markers",
+		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head",
 		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
 		"reviewctl enqueue", "reviewctl safe failure",
-		"sqlite retry history", "sqlite retry queue", "reviewctl first success", "gh markers", "gh head readback",
+		"sqlite retry history", "sqlite retry queue", "reviewctl doctor", "gh markers",
+		"reviewctl first success", "gh markers", "gh head readback",
 		"reviewctl enqueue", "reviewctl recovery", "gh markers", "gh head readback", "sqlite history",
 		"sqlite successes", "sqlite failures", "sqlite queue",
 	}, "\n") + "\n"
@@ -193,7 +199,7 @@ func TestLiveE2EHelper(t *testing.T) {
 }
 
 func helperLiveGH(args []string) {
-	markerQuery := fmt.Sprintf(".[] | select(.body != null and (.body | contains(\"<!-- reviewctl:github:denifilatoff/reviewctl#24:%s:\"))) | .id", liveFixtureHead)
+	markerQuery := fmt.Sprintf(".[] | select(.body != null and (.body | contains(\"<!-- reviewctl:github:denifilatoff/reviewctl#24:%s:sha256:test --\u003e\"))) | .id", liveFixtureHead)
 	switch {
 	case sameArgs(args, "auth", "status"):
 		appendLiveCall("gh auth")
@@ -273,6 +279,11 @@ func helperLiveSQLite(args []string) {
 }
 
 func helperLiveReviewctl(args []string) {
+	if sameArgs(args, "--json", "doctor") {
+		appendLiveCall("reviewctl doctor")
+		fmt.Println(`{"command":"doctor","status":"success","prerequisites":[{"prerequisite":"apm","ready":true,"skill_digest":"sha256:test"}]}`)
+		return
+	}
 	if sameArgs(args, "--json", "review", liveFixtureURL) {
 		appendLiveCall("reviewctl enqueue")
 		fmt.Println(`{"command":"review","status":"queued"}`)
@@ -299,8 +310,9 @@ func helperLiveReviewctl(args []string) {
 		os.Exit(1)
 	case 3:
 		appendLiveCall("reviewctl first success")
-		recovered := readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")) == 1
-		if !recovered {
+		markers := readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE"))
+		recovered := markers > 0
+		if markers == 0 {
 			if os.WriteFile(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE"), []byte("1"), 0o600) != nil {
 				os.Exit(84)
 			}

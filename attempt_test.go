@@ -51,6 +51,21 @@ func TestTrustedInstructionAuthorizesOwnedDiscussionSynchronization(t *testing.T
 	}
 }
 
+func TestTrustedInstructionAuthorizesEscalatedGitHubCLIFallback(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	instruction := trustedInstruction(pr, "head", "digest", "/source", "/receipt", nil)
+	for _, required := range []string{
+		"Set sandbox_permissions=require_escalated for GitHub CLI API commands",
+		"Do not use sandboxed gh auth status",
+		"Do not use a browser fallback",
+		"Do not ask for another publication confirmation",
+	} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("trusted instruction does not contain %q", required)
+		}
+	}
+}
+
 func TestValidateGitHubPullRequestFailsClosed(t *testing.T) {
 	cfg := Config{
 		Harness:        "codex",

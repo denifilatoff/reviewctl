@@ -32,7 +32,9 @@ plutil=$(find_executable plutil)
 launchctl=$(find_executable launchctl)
 
 job_path=/usr/bin:/bin
-for executable in "$reviewctl" "$gh" "$codex" "$apm"; do
+ccusage=$(command -v ccusage || true)
+for executable in "$reviewctl" "$gh" "$codex" "$apm" "$ccusage"; do
+	[ -n "$executable" ] || continue
 	directory=${executable%/*}
 	case :$job_path: in
 	*:$directory:*) ;;

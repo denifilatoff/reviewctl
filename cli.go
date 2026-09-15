@@ -25,6 +25,7 @@ type resultError struct {
 
 type runItem struct {
 	PullRequest
+	Cost      *ReviewCost  `json:"cost,omitempty"`
 	Status    string       `json:"status"`
 	Verdict   string       `json:"verdict,omitempty"`
 	ReviewURL string       `json:"review_url,omitempty"`
@@ -47,6 +48,7 @@ type discoveryItem struct {
 }
 
 type runResult struct {
+	SignatureErrors    []resultError   `json:"signature_errors,omitempty"`
 	Command            string          `json:"command"`
 	Status             string          `json:"status"`
 	Repositories       int             `json:"repositories"`
@@ -65,6 +67,7 @@ type runResult struct {
 type doctorCheck struct {
 	Prerequisite string       `json:"prerequisite"`
 	Ready        bool         `json:"ready"`
+	SkillDigest  string       `json:"skill_digest,omitempty"`
 	Error        *resultError `json:"error,omitempty"`
 }
 
@@ -143,7 +146,10 @@ func doctorCommand(stdout io.Writer, jsonMode bool) int {
 		checks = append(checks, doctorResultFor("github", "github_failed", checkGitHubAccess(cfg)))
 	}
 	checks = append(checks, doctorResultFor("codex", "codex_failed", checkCodex()))
-	checks = append(checks, doctorResultFor("apm", "apm_failed", checkLockedSkills()))
+	digest, skillError := checkLockedSkills()
+	skillCheck := doctorResultFor("apm", "apm_failed", skillError)
+	skillCheck.SkillDigest = digest
+	checks = append(checks, skillCheck)
 	checks = append(checks, doctorResultFor("state", "state_failed", checkState()))
 	checks = append(checks, doctorResultFor("paths", "paths_failed", checkRequiredPaths()))
 	result := doctorResult{Command: "doctor", Status: "success", Prerequisites: checks}
@@ -211,16 +217,15 @@ func checkGitHubAccess(cfg Config) error {
 	return nil
 }
 
-func checkLockedSkills() error {
+func checkLockedSkills() (string, error) {
 	workspace, err := os.MkdirTemp("", "reviewctl-doctor-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(workspace)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = installLockedSkills(ctx, workspace)
-	return err
+	return installLockedSkills(ctx, workspace)
 }
 
 func checkState() error {
@@ -401,6 +406,9 @@ func statusCommand(limit int, stdout, stderr io.Writer, jsonMode bool) int {
 					fmt.Fprintf(stdout, ": %s", bounded(attempt.ErrorMessage, 512))
 				}
 			}
+			if attempt.Cost != nil {
+				fmt.Fprintf(stdout, " %s", attempt.Cost.signature())
+			}
 			fmt.Fprintln(stdout)
 		}
 		return 0
@@ -454,7 +462,7 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 	}
 	for _, pr := range queue {
 		attemptContext, cancel := context.WithTimeout(runContext, cfg.AttemptTimeout)
-		attempt := ProcessAttempt(attemptContext, cfg, pr)
+		attempt := ProcessAttempt(attemptContext, cfg, store, pr)
 		attemptContextError := attemptContext.Err()
 		cancel()
 		if errors.Is(attemptContextError, context.DeadlineExceeded) {
@@ -471,7 +479,7 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 			attempt.ErrorCode = "state_failed"
 			attempt.ErrorMessage = bounded(err.Error(), 512)
 		}
-		item := runItem{PullRequest: pr, Status: "failed"}
+		item := runItem{PullRequest: pr, Status: "failed", Cost: attempt.Cost}
 		if attempt.Success {
 			item.Status, item.Verdict, item.ReviewURL, item.Recovered = "success", attempt.Verdict, attempt.ReviewURL, attempt.Recovered
 			result.Succeeded++
@@ -485,8 +493,12 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 			break
 		}
 	}
+	result.SignatureErrors = store.deliverSignatures(runContext, cfg)
 	exitCode := 0
 	if result.DiscoveryFailed > 0 || result.Failed > 0 {
+		result.Status, exitCode = "failed", 1
+	}
+	if len(result.SignatureErrors) > 0 {
 		result.Status, exitCode = "failed", 1
 	}
 	if jsonMode {
@@ -498,6 +510,9 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 }
 
 func writeHumanRunResult(stdout io.Writer, result runResult) {
+	for _, err := range result.SignatureErrors {
+		fmt.Fprintf(stdout, "signature: %s: %s\n", err.Code, err.Message)
+	}
 	fmt.Fprintf(stdout,
 		"run: repositories=%d discovery_failed=%d discovered=%d enqueued=%d queued=%d attempted=%d succeeded=%d failed=%d\n",
 		result.Repositories, result.DiscoveryFailed, result.Discovered, result.Enqueued, result.Queued,
@@ -552,7 +567,13 @@ func discoverRepositories(ctx context.Context, cfg Config, store *Store) []disco
 		}
 		if fetched.err == nil {
 			item.Observed = len(fetched.snapshot)
-			item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, fetched.snapshot)
+			eligible := fetched.snapshot[:0]
+			for _, pullRequest := range fetched.snapshot {
+				if isTrustedGitHubAuthor(cfg, pullRequest.Author) {
+					eligible = append(eligible, pullRequest)
+				}
+			}
+			item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, eligible)
 		}
 		if fetched.err != nil {
 			item.Status = "failed"

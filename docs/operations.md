@@ -33,6 +33,8 @@ publishing reviews.
 
 ```yaml
 harness: codex
+model: gpt-6-astra
+reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 
@@ -50,6 +52,42 @@ Only `github` and `codex` are valid values. `attempt_timeout` is optional, defau
 zero and no more than `24h`. `trusted_authors` applies to every configured repository. Only pull requests from those
 GitHub logins may reach Codex.
 
+## Model and review cost
+
+Set the review model and reasoning effort with these settings:
+
+```yaml
+model: gpt-6-astra
+reasoning_effort: low
+```
+
+ReviewCTL defaults to `gpt-6-astra` and `low` when either setting is omitted. Codex validates whether a selected model
+supports the configured effort. History records both the requested settings and the model and effort observed in the
+session logs.
+
+Install [ccusage](https://ccusage.com/guide/) version 20.0.19 or newer within 20.x and put it on the same `PATH` as
+`reviewctl`. Cost estimation uses `ccusage codex session --json --no-offline`, with only the review's session logs
+and their native descendants copied into a temporary directory. No telemetry setup is needed. Codex runs are no
+longer ephemeral: logs remain in the normal Codex home, which may contain review source and prompts. Temporary
+accounting copies are removed after calculation. Do not remove active logs before the review finishes.
+
+After the model finishes, the controller adds one line to the GitHub review, for example
+`Model: gpt-6-astra low (~$0.1)`. Model and reasoning effort come from the primary agent's session.
+The displayed amount is rounded to one decimal place; history keeps full precision.
+The amount includes native subagents, using ccusage's token and inherited-history accounting. It is an
+API-equivalent estimate, not a subscription charge or a billing statement. Internet prices come from ccusage's
+upstream catalog; reviewctl does not maintain a pricing table. Catalog lag and ccusage's pricing fallbacks can
+affect the estimate.
+
+Missing ccusage, unreadable or incomplete logs, model-attribution fallbacks, warnings, or invalid reports produce
+`cost unavailable`, not a guessed total. Review publication still succeeds. Accounting has a separate 30-second
+timeout after Codex exits. `reviewctl --json status` exposes session IDs, calculator version, calculation time,
+the report, and any accounting error; `doctor` does not validate pricing availability.
+
+Failed signature delivery is saved in SQLite and retried by the next `run`, without repeating the review.
+`run` reports `signature_pending` and exits with code `1` until delivery succeeds. An unavailable estimate is
+not automatically recalculated. Recovery of an existing review does not replace its original model or cost.
+
 ## Run in production on macOS
 
 Keep `publish: false` while setting up a production schedule.
@@ -62,7 +100,8 @@ Keep `publish: false` while setting up a production schedule.
 5. Change `publish` to `true`, run `reviewctl doctor` again, then run `reviewctl --json run` once manually.
 6. Follow [Schedule with launchd](#schedule-with-launchd).
 
-Later scheduled runs queue new ready pull requests, draft-to-ready transitions, and head changes.
+Later scheduled runs queue pull requests from trusted authors when they become ready, receive a new head, or become
+eligible after a `trusted_authors` change.
 
 ## Check prerequisites
 
@@ -108,8 +147,9 @@ reviewctl run
 ```
 
 Only one `run` process can execute at once. A concurrent call reports `already_running` and exits successfully. A
-failed discovery or review attempt makes `run` exit with code `1`; failed review entries remain queued for a later run.
-If a pull request head changes during an attempt, `run` reports `head_changed` and leaves the entry queued.
+failed discovery or review attempt makes `run` exit with code `1`. Transient failures remain queued for a later run.
+An untrusted, closed, or draft pull request leaves the queue and can return through discovery after its eligibility
+changes. If a pull request head changes during an attempt, `run` reports `head_changed` and leaves the entry queued.
 
 A review attempt can take several minutes, and `run` writes its result after the attempt finishes. Use
 `reviewctl status` to check `run_active`; do not interrupt an active attempt or start a replacement process.
@@ -143,8 +183,9 @@ On macOS, install a `launchd` job with a 10-minute interval:
 )
 ```
 
-The interval is optional and defaults to 300 seconds. The installer finds `reviewctl`, `gh`, `codex`, and `apm` in the
-current `PATH`, preserves the configured XDG locations, runs `reviewctl doctor` in the scheduled environment, validates
+The interval is optional and defaults to 300 seconds. The installer finds `reviewctl`, `gh`, `codex`, `apm`, and optional
+`ccusage` in the current `PATH`, preserves the configured XDG locations, runs `reviewctl doctor` in the scheduled
+environment, validates
 the generated plist, and loads the job. It writes the plist under `~/Library/LaunchAgents` and logs under
 `~/Library/Logs`. If a plist already exists, the installer asks before replacing it.
 

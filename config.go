@@ -15,11 +15,13 @@ import (
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 type Config struct {
-	Harness        string        `yaml:"harness"`
-	Publish        bool          `yaml:"publish"`
-	AttemptTimeout time.Duration `yaml:"attempt_timeout"`
-	TrustedAuthors []string      `yaml:"trusted_authors"`
-	Repositories   []Repository  `yaml:"repositories"`
+	Model           string        `yaml:"model"`
+	ReasoningEffort string        `yaml:"reasoning_effort"`
+	Harness         string        `yaml:"harness"`
+	Publish         bool          `yaml:"publish"`
+	AttemptTimeout  time.Duration `yaml:"attempt_timeout"`
+	TrustedAuthors  []string      `yaml:"trusted_authors"`
+	Repositories    []Repository  `yaml:"repositories"`
 }
 
 type Repository struct {
@@ -28,7 +30,7 @@ type Repository struct {
 }
 
 func DecodeConfig(r io.Reader) (Config, error) {
-	cfg := Config{AttemptTimeout: time.Hour}
+	cfg := Config{Model: "gpt-6-astra", ReasoningEffort: "low", AttemptTimeout: time.Hour}
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -46,6 +48,14 @@ func DecodeConfig(r io.Reader) (Config, error) {
 	}
 	if cfg.AttemptTimeout <= 0 || cfg.AttemptTimeout > 24*time.Hour {
 		return cfg, fmt.Errorf("attempt timeout must be greater than zero and at most 24h")
+	}
+	if !validModel(cfg.Model) {
+		return cfg, fmt.Errorf("model must be a model identifier")
+	}
+	switch cfg.ReasoningEffort {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+	default:
+		return cfg, fmt.Errorf("invalid reasoning_effort")
 	}
 	for i := range cfg.TrustedAuthors {
 		cfg.TrustedAuthors[i] = normalizeGitHubLogin(cfg.TrustedAuthors[i])
@@ -84,6 +94,8 @@ func statePath() (string, error) {
 func cachePath() (string, error) { return defaultPath("XDG_CACHE_HOME", ".cache", "") }
 
 const initialConfig = `harness: codex
+model: gpt-6-astra
+reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 trusted_authors: []

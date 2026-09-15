@@ -49,7 +49,7 @@ set -eu
 if [ "$#" -eq 10 ] && [ "$1" = pr ] && [ "$2" = list ] && [ "$3" = --repo ] && \
     [ "$4" = example/smoke ] && [ "$5" = --state ] && [ "$6" = open ] && \
     [ "$7" = --limit ] && [ "$8" = 1001 ] && [ "$9" = --json ] && \
-    [ "${10}" = url,number,state,isDraft,headRefOid ]; then
+    [ "${10}" = url,number,state,isDraft,headRefOid,author ]; then
 	printf '[]\n'
 	exit 0
 fi

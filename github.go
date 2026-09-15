@@ -251,6 +251,7 @@ type pullRequestSnapshot struct {
 	PullRequest
 	IsDraft bool
 	HeadSHA string
+	Author  string
 }
 
 func shouldEnqueueDiscovery(initialized bool, previous *pullRequestSnapshot, current pullRequestSnapshot) bool {
@@ -263,7 +264,7 @@ func shouldEnqueueDiscovery(initialized bool, previous *pullRequestSnapshot, cur
 func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullRequestSnapshot, error) {
 	// ponytail: The sentinel avoids pagination until a repository exceeds 1,000 open PRs.
 	command := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repository.Repository, "--state", "open",
-		"--limit", "1001", "--json", "url,number,state,isDraft,headRefOid")
+		"--limit", "1001", "--json", "url,number,state,isDraft,headRefOid,author")
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	if err := command.Run(); err != nil {
@@ -276,6 +277,9 @@ func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullR
 		State      string `json:"state"`
 		IsDraft    bool   `json:"isDraft"`
 		HeadRefOID string `json:"headRefOid"`
+		Author     struct {
+			Login string `json:"login"`
+		} `json:"author"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		return nil, fail("github_failed", "decode gh response for %s: %v", repository.Repository, err)
@@ -297,13 +301,29 @@ func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullR
 			return nil, fail("github_failed", "gh returned an invalid open pull request for %s", repository.Repository)
 		}
 		seen[item.Number] = true
-		snapshot[i] = pullRequestSnapshot{PullRequest: pr, IsDraft: item.IsDraft, HeadSHA: item.HeadRefOID}
+		snapshot[i] = pullRequestSnapshot{
+			PullRequest: pr, IsDraft: item.IsDraft, HeadSHA: item.HeadRefOID, Author: item.Author.Login,
+		}
 	}
 	sort.Slice(snapshot, func(i, j int) bool { return snapshot[i].Number < snapshot[j].Number })
 	return snapshot, nil
 }
 
 func ValidateGitHubPullRequest(cfg Config, expected PullRequest, resolved GitHubPullRequest) error {
+	if err := validateGitHubReviewTarget(cfg, expected, resolved); err != nil {
+		return err
+	}
+	if resolved.State != "OPEN" {
+		return fail("pr_not_open", "pull request is not open")
+	}
+	if resolved.IsDraft {
+		return fail("pr_draft", "pull request is a draft")
+	}
+	return nil
+}
+
+// Existing reviews can receive their accounting signature after a pull request closes.
+func validateGitHubReviewTarget(cfg Config, expected PullRequest, resolved GitHubPullRequest) error {
 	if !cfg.Publish {
 		return fail("publication_disabled", "publication is disabled")
 	}
@@ -317,25 +337,21 @@ func ValidateGitHubPullRequest(cfg Config, expected PullRequest, resolved GitHub
 	if !allowed {
 		return fail("repository_not_allowed", "repository %s is not configured", expected.Repository)
 	}
-	trusted := false
-	author := normalizeGitHubLogin(resolved.Author)
-	for _, configured := range cfg.TrustedAuthors {
-		if configured == author {
-			trusted = true
-			break
-		}
-	}
-	if !trusted {
+	if !isTrustedGitHubAuthor(cfg, resolved.Author) {
 		return fail("untrusted_author", "pull request author %s is not trusted", resolved.Author)
 	}
 	if !samePullRequestIdentity(resolved.URL, expected) || resolved.Number != expected.Number || resolved.HeadSHA == "" {
 		return fail("github_mismatch", "GitHub response does not match the queued pull request")
 	}
-	if resolved.State != "OPEN" {
-		return fail("pr_not_open", "pull request is not open")
-	}
-	if resolved.IsDraft {
-		return fail("pr_draft", "pull request is a draft")
-	}
 	return nil
+}
+
+func isTrustedGitHubAuthor(cfg Config, login string) bool {
+	author := normalizeGitHubLogin(login)
+	for _, configured := range cfg.TrustedAuthors {
+		if configured == author {
+			return true
+		}
+	}
+	return false
 }
