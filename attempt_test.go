@@ -236,6 +236,18 @@ func TestValidateDiscussionOutcomesRejectsUnverifiedResults(t *testing.T) {
 	}); err == nil {
 		t.Fatal("accepted a new reply as a preserved discussion")
 	}
+	duplicateReplies := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer"},
+			{DatabaseID: 4, Author: "reviewer", ReplyToID: 1},
+			{DatabaseID: 5, Author: "reviewer", ReplyToID: 1},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, duplicateReplies, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "open_with_reply", ReplyID: "4"},
+	}); err == nil {
+		t.Fatal("accepted an unreported duplicate reply")
+	}
 	resolved := []githubReviewThread{{
 		ID: "owned", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}},
 	}}
@@ -243,6 +255,33 @@ func TestValidateDiscussionOutcomesRejectsUnverifiedResults(t *testing.T) {
 		{ThreadID: "owned", Action: "preserved"},
 	}); err == nil {
 		t.Fatal("accepted a changed discussion as preserved")
+	}
+}
+
+func TestValidateDiscussionOutcomesRejectsUnownedThreadMutationsButAllowsNewFindings(t *testing.T) {
+	initial := []githubReviewThread{{
+		ID: "other", Comments: []githubReviewComment{{DatabaseID: 1, Author: "someone-else"}},
+	}}
+	mutated := []githubReviewThread{{
+		ID: "other", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 1, Author: "someone-else"}},
+	}}
+	if err := validateDiscussionOutcomes(initial, mutated, "reviewer", []DiscussionOutcome{}); err == nil {
+		t.Fatal("accepted a resolution change to an unowned discussion")
+	}
+	replied := []githubReviewThread{{
+		ID: "other", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "someone-else"},
+			{DatabaseID: 2, Author: "reviewer", ReplyToID: 1},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, replied, "reviewer", []DiscussionOutcome{}); err == nil {
+		t.Fatal("accepted a reply to an unowned discussion")
+	}
+	newFinding := append(initial, githubReviewThread{
+		ID: "new", Comments: []githubReviewComment{{DatabaseID: 3, Author: "reviewer"}},
+	})
+	if err := validateDiscussionOutcomes(initial, newFinding, "reviewer", []DiscussionOutcome{}); err != nil {
+		t.Fatalf("rejected a new current-review finding: %v", err)
 	}
 }
 

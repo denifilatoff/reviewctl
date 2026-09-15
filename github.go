@@ -167,6 +167,16 @@ func validateDiscussionOutcomes(initial, current []githubReviewThread, login str
 	for _, thread := range current {
 		final[thread.ID] = thread
 	}
+	for _, before := range initial {
+		after, ok := final[before.ID]
+		if !ok {
+			return fmt.Errorf("discussion outcome readback mismatch")
+		}
+		if _, owned := expected[before.ID]; !owned &&
+			(after.IsResolved != before.IsResolved || len(newDiscussionReplyIDs(before, after, login)) != 0) {
+			return fmt.Errorf("unowned discussion changed during review")
+		}
+	}
 	seen := make(map[string]bool, len(outcomes))
 	for _, outcome := range outcomes {
 		if _, ok := expected[outcome.ThreadID]; !ok || seen[outcome.ThreadID] {
@@ -178,17 +188,18 @@ func validateDiscussionOutcomes(initial, current []githubReviewThread, login str
 			return fmt.Errorf("discussion outcome readback mismatch")
 		}
 		before := expected[outcome.ThreadID]
-		hasReply := validDiscussionReply(before, thread, outcome.ReplyID, login)
-		hasNewReply := hasNewDiscussionReply(before, thread, login)
+		newReplies := newDiscussionReplyIDs(before, thread, login)
+		replyID, replyErr := strconv.ParseInt(string(outcome.ReplyID), 10, 64)
+		hasReply := replyErr == nil && replyID > 0 && len(newReplies) == 1 && newReplies[0] == replyID
 		switch outcome.Action {
 		case "resolved":
-			ok = thread.IsResolved && outcome.ReplyID == "" && !hasNewReply
+			ok = thread.IsResolved && outcome.ReplyID == "" && len(newReplies) == 0
 		case "resolved_with_reply":
 			ok = thread.IsResolved && hasReply
 		case "open_with_reply":
 			ok = !thread.IsResolved && hasReply
 		case "preserved":
-			ok = thread.IsResolved == before.IsResolved && outcome.ReplyID == "" && !hasNewReply
+			ok = thread.IsResolved == before.IsResolved && outcome.ReplyID == "" && len(newReplies) == 0
 		default:
 			ok = false
 		}
@@ -199,35 +210,18 @@ func validateDiscussionOutcomes(initial, current []githubReviewThread, login str
 	return nil
 }
 
-func validDiscussionReply(before, thread githubReviewThread, value json.Number, login string) bool {
-	id, err := strconv.ParseInt(string(value), 10, 64)
-	if err != nil || id <= 0 {
-		return false
-	}
-	for _, comment := range before.Comments {
-		if comment.DatabaseID == id {
-			return false
-		}
-	}
-	for _, comment := range thread.Comments {
-		if comment.DatabaseID == id && comment.ReplyToID != 0 && normalizeGitHubLogin(comment.Author) == login {
-			return true
-		}
-	}
-	return false
-}
-
-func hasNewDiscussionReply(before, thread githubReviewThread, login string) bool {
+func newDiscussionReplyIDs(before, thread githubReviewThread, login string) []int64 {
 	existing := make(map[int64]bool, len(before.Comments))
 	for _, comment := range before.Comments {
 		existing[comment.DatabaseID] = true
 	}
+	var ids []int64
 	for _, comment := range thread.Comments {
 		if !existing[comment.DatabaseID] && comment.ReplyToID != 0 && normalizeGitHubLogin(comment.Author) == login {
-			return true
+			ids = append(ids, comment.DatabaseID)
 		}
 	}
-	return false
+	return ids
 }
 
 type pullRequestSnapshot struct {
