@@ -61,6 +61,27 @@ type submittedReview struct {
 	} `json:"user"`
 }
 
+func findMarkerReview(ctx context.Context, pr PullRequest, marker string) (int64, error) {
+	endpoint := fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.Repository, pr.Number)
+	var pages [][]submittedReview
+	if err := githubJSON(ctx, []string{endpoint, "--paginate", "--slurp"}, nil, &pages); err != nil {
+		return 0, fmt.Errorf("read submitted reviews: %w", err)
+	}
+	var found int64
+	for _, page := range pages {
+		for _, review := range page {
+			if !strings.Contains(review.Body, marker) {
+				continue
+			}
+			if found != 0 || review.ID <= 0 {
+				return 0, fmt.Errorf("idempotency marker does not identify exactly one review")
+			}
+			found = review.ID
+		}
+	}
+	return found, nil
+}
+
 func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 	if attempt.Cost == nil || !attempt.Success || attempt.Recovered {
 		return fmt.Errorf("attempt has no original review accounting")
@@ -85,7 +106,7 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 	if err := githubJSON(ctx, []string{endpoint}, nil, &review); err != nil {
 		return err
 	}
-	marker := fmt.Sprintf("<!-- reviewctl:%s:%s#%d:%s:%s -->", attempt.Provider, attempt.Repository, attempt.Number, attempt.HeadSHA, attempt.SkillDigest)
+	marker := reviewMarker(attempt.PullRequest, attempt.HeadSHA, attempt.SkillDigest)
 	if review.ID != id || review.Commit != attempt.HeadSHA || review.URL != attempt.ReviewURL ||
 		normalizeGitHubLogin(review.User.Login) != login || !strings.Contains(review.Body, marker) {
 		return fmt.Errorf("submitted review does not match the recorded attempt and authenticated reviewer")
@@ -111,10 +132,15 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 }
 
 func (s *Store) deliverSignatures(ctx context.Context, cfg Config) []resultError {
+	return s.deliverSignatureBatch(ctx, cfg, 100)
+}
+
+func (s *Store) deliverSignatureBatch(ctx context.Context, cfg Config, limit int) []resultError {
 	if !cfg.Publish {
 		return nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, attempt FROM review_signatures ORDER BY id LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, attempt FROM review_signatures ORDER BY attempted_at, id LIMIT ?`, limit)
 	if err != nil {
 		return []resultError{{Code: "signature_state_failed", Message: bounded(err.Error(), 512)}}
 	}
@@ -150,7 +176,9 @@ func (s *Store) deliverSignatures(ctx context.Context, cfg Config) []resultError
 		if err == nil {
 			_, err = s.db.ExecContext(ctx, `DELETE FROM review_signatures WHERE id = ?`, entry.id)
 		} else {
-			_, _ = s.db.ExecContext(ctx, `UPDATE review_signatures SET error_message = ? WHERE id = ?`, bounded(err.Error(), 512), entry.id)
+			_, _ = s.db.ExecContext(ctx,
+				`UPDATE review_signatures SET error_message = ?, attempted_at = ? WHERE id = ?`,
+				bounded(err.Error(), 512), time.Now().UnixNano(), entry.id)
 		}
 		if err != nil {
 			failures = append(failures, resultError{Code: "signature_pending", Message: bounded(attempt.ReviewURL+": "+err.Error(), 512)})

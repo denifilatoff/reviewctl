@@ -40,14 +40,26 @@ type logRecord struct {
 	} `json:"payload"`
 }
 
-func readLogMeta(path string) (codexLog, error) {
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
+func readLogMeta(ctx context.Context, path string) (codexLog, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return codexLog{}, err
 	}
 	defer file.Close()
 	var record logRecord
-	if err := json.NewDecoder(io.LimitReader(file, 2<<20)).Decode(&record); err != nil {
+	if err := json.NewDecoder(io.LimitReader(contextReader{ctx: ctx, r: file}, 2<<20)).Decode(&record); err != nil {
 		return codexLog{}, err
 	}
 	if record.Type != "session_meta" || record.Payload.ID == "" {
@@ -69,13 +81,13 @@ func readLogMeta(path string) (codexLog, error) {
 	return codexLog{ID: record.Payload.ID, Parent: parent, Path: path, AgentPath: source.Subagent.Spawn.Path}, nil
 }
 
-func readLogContext(log *codexLog) error {
+func readLogContext(ctx context.Context, log *codexLog) error {
 	file, err := os.Open(log.Path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(contextReader{ctx: ctx, r: file})
 	scanner.Buffer(make([]byte, 65536), 16<<20)
 	turn := ""
 	spawns := map[string]bool{}
@@ -142,7 +154,10 @@ func codexHome() (string, error) {
 	return filepath.Join(home, ".codex"), err
 }
 
-func codexLogTree(home, root string, started time.Time) ([]codexLog, error) {
+func codexLogTree(ctx context.Context, home, root string, started time.Time) ([]codexLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if root == "" {
 		return nil, fmt.Errorf("Codex did not expose a session ID")
 	}
@@ -150,6 +165,9 @@ func codexLogTree(home, root string, started time.Time) ([]codexLog, error) {
 	for _, directory := range []string{"sessions", "archived_sessions"} {
 		base := filepath.Join(home, directory)
 		err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -163,7 +181,7 @@ func codexLogTree(home, root string, started time.Time) ([]codexLog, error) {
 			if info.ModTime().Before(started.Add(-time.Minute)) {
 				return nil
 			}
-			log, err := readLogMeta(path)
+			log, err := readLogMeta(ctx, path)
 			if err != nil {
 				return nil
 			}
@@ -190,8 +208,11 @@ func codexLogTree(home, root string, started time.Time) ([]codexLog, error) {
 	}
 	var result []codexLog
 	for id := range selected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		log := logs[id]
-		if err := readLogContext(&log); err != nil {
+		if err := readLogContext(ctx, &log); err != nil {
 			return nil, fmt.Errorf("session %s: %w", id, err)
 		}
 		result = append(result, log)
@@ -282,7 +303,7 @@ func collectCost(ctx context.Context, cfg Config, root string, started time.Time
 		cost.UsageError = err.Error()
 		return cost
 	}
-	logs, err := codexLogTree(home, root, started)
+	logs, err := codexLogTree(ctx, home, root, started)
 	if err != nil {
 		cost.UsageError = bounded(err.Error(), 512)
 		return cost
@@ -364,7 +385,7 @@ func runCCUsage(ctx context.Context, logs []codexLog, home string) ([]byte, stri
 			source.Close()
 			return nil, versionText, err
 		}
-		n, copyErr := io.Copy(target, io.LimitReader(source, (256<<20)+1))
+		n, copyErr := copyContext(ctx, target, source, (256<<20)+1)
 		source.Close()
 		closeErr := target.Close()
 		if copyErr != nil || closeErr != nil || n > 256<<20 {
@@ -406,6 +427,10 @@ func runCCUsage(ctx context.Context, logs []codexLog, home string) ([]byte, stri
 		return nil, versionText, fmt.Errorf("ccusage reported a warning: %s", bounded(stderr.String(), 512))
 	}
 	return stdout.Bytes(), versionText, nil
+}
+
+func copyContext(ctx context.Context, dst io.Writer, src io.Reader, limit int64) (int64, error) {
+	return io.Copy(dst, io.LimitReader(contextReader{ctx: ctx, r: src}, limit))
 }
 
 type limitedOutput struct {

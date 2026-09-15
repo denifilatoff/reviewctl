@@ -111,10 +111,20 @@ if [ "$retry_history" -ne 1 ] || [ "$retry_queue" -ne 1 ]; then
   exit 1
 fi
 
+doctor=$("$binary" --json doctor)
+skill_digest=$(printf '%s\n' "$doctor" | sed -n 's/.*"skill_digest":"\([^"]*\)".*/\1/p')
+case $skill_digest in
+sha256:*) ;;
+*) echo "doctor did not report the locked skill digest" >&2; exit 1 ;;
+esac
+initial_count=$(count_markers "$skill_digest")
+if [ "$initial_count" -gt 1 ]; then
+  echo "unsafe live fixture: duplicate reviewctl markers" >&2
+  exit 1
+fi
+
 write_config true
 "$binary" --json run >"$work/run-1.json"
-skill_digest=$(sqlite3 "$work/state/reviewctl/reviewctl.db" \
-  "SELECT skill_digest FROM history WHERE success = 1 ORDER BY id DESC LIMIT 1;")
 first_count=$(count_markers "$skill_digest")
 if [ "$first_count" -ne 1 ] || ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
   echo "first successful run did not read back exactly one COMMENT review" >&2

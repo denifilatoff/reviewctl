@@ -3,13 +3,31 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCodexLogTreeHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := codexLogTree(ctx, t.TempDir(), "root", time.Now()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled log traversal returned %v", err)
+	}
+}
+
+func TestCopyContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := copyContext(ctx, io.Discard, strings.NewReader("session log"), 256<<20); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled log copy returned %v", err)
+	}
+}
 
 func TestUsageAccounting(t *testing.T) {
 	home := t.TempDir()
@@ -28,7 +46,7 @@ func TestUsageAccounting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	logs, err := codexLogTree(home, "root", time.Now())
+	logs, err := codexLogTree(context.Background(), home, "root", time.Now())
 	if err != nil || len(logs) != 3 {
 		t.Fatalf("tree: %+v, %v", logs, err)
 	}
@@ -70,7 +88,7 @@ func TestUsageAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := readLogContext(&logs[0]); err != nil || logs[0].Complete {
+	if err := readLogContext(context.Background(), &logs[0]); err != nil || logs[0].Complete {
 		t.Fatalf("unfinished session accepted: %+v %v", logs[0], err)
 	}
 	for _, identity := range []string{`{"agent_id":"missing-grandchild"}`, `{"task_name":"/root/child/missing-grandchild"}`} {
@@ -85,7 +103,7 @@ func TestUsageAccounting(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, "sessions", "child.jsonl"), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := codexLogTree(home, "root", time.Now()); err == nil || !strings.Contains(err.Error(), "descendant") {
+		if _, err := codexLogTree(context.Background(), home, "root", time.Now()); err == nil || !strings.Contains(err.Error(), "descendant") {
 			t.Fatalf("accepted missing nested spawn %s: %v", identity, err)
 		}
 	}

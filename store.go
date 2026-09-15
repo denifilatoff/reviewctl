@@ -77,7 +77,8 @@ func OpenStore(path string) (*Store, error) {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			review_id TEXT NOT NULL UNIQUE,
 			attempt TEXT NOT NULL,
-			error_message TEXT NOT NULL DEFAULT ''
+			error_message TEXT NOT NULL DEFAULT '',
+			attempted_at INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
@@ -104,6 +105,18 @@ func OpenStore(path string) (*Store, error) {
 			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = 'cost_json'`).Scan(&exists); checkErr != nil || exists == 0 {
 				db.Close()
 				return nil, fmt.Errorf("migrate history: %w", err)
+			}
+		}
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("inspect signature schema: %w", err)
+	}
+	if exists == 0 {
+		if _, err := db.Exec(`ALTER TABLE review_signatures ADD COLUMN attempted_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); checkErr != nil || exists == 0 {
+				db.Close()
+				return nil, fmt.Errorf("migrate signature queue: %w", err)
 			}
 		}
 	}

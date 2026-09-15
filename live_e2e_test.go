@@ -80,7 +80,7 @@ func TestLiveE2EFailsClosedWhenMarkerReadFails(t *testing.T) {
 		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head",
 		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
 		"reviewctl enqueue", "reviewctl safe failure", "sqlite retry history", "sqlite retry queue",
-		"reviewctl first success", "sqlite skill digest", "gh markers",
+		"reviewctl doctor", "gh markers",
 	}, "\n") + "\n"
 	if string(data) != want {
 		t.Fatalf("helper calls after marker read failure:\n%s\nwant:\n%s", data, want)
@@ -155,7 +155,8 @@ func assertLiveCallOrder(t *testing.T, path string) {
 		"gh auth", "codex login", "gh preflight", "gh REST author", "gh REST head",
 		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
 		"reviewctl enqueue", "reviewctl safe failure",
-		"sqlite retry history", "sqlite retry queue", "reviewctl first success", "sqlite skill digest", "gh markers", "gh head readback",
+		"sqlite retry history", "sqlite retry queue", "reviewctl doctor", "gh markers",
+		"reviewctl first success", "gh markers", "gh head readback",
 		"reviewctl enqueue", "reviewctl recovery", "gh markers", "gh head readback", "sqlite history",
 		"sqlite successes", "sqlite failures", "sqlite queue",
 	}, "\n") + "\n"
@@ -240,9 +241,6 @@ func helperLiveSQLite(args []string) {
 	}
 	runs := readTestCounter(os.Getenv("REVIEWCTL_LIVE_RUN_STATE"))
 	switch args[1] {
-	case "SELECT skill_digest FROM history WHERE success = 1 ORDER BY id DESC LIMIT 1;":
-		appendLiveCall("sqlite skill digest")
-		fmt.Println("sha256:test")
 	case "SELECT COUNT(*) FROM repository_baselines WHERE provider = 'github' AND repository = 'denifilatoff/reviewctl';":
 		appendLiveCall("sqlite baseline")
 		fmt.Println("1")
@@ -281,6 +279,11 @@ func helperLiveSQLite(args []string) {
 }
 
 func helperLiveReviewctl(args []string) {
+	if sameArgs(args, "--json", "doctor") {
+		appendLiveCall("reviewctl doctor")
+		fmt.Println(`{"command":"doctor","status":"success","prerequisites":[{"prerequisite":"apm","ready":true,"skill_digest":"sha256:test"}]}`)
+		return
+	}
 	if sameArgs(args, "--json", "review", liveFixtureURL) {
 		appendLiveCall("reviewctl enqueue")
 		fmt.Println(`{"command":"review","status":"queued"}`)

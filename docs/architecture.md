@@ -354,7 +354,7 @@ Schema files, or a separate agent protocol.
 Command results expose the smallest useful facts:
 
 - `init` returns the configuration path it created.
-- `doctor` returns each prerequisite and whether it is ready.
+- `doctor` returns each prerequisite and whether it is ready; the APM check also returns the installed skill digest.
 - `review` returns the pull request identity and `queued` or `already_queued`.
 - `bulk-review` returns one result per argument in input order.
 - `run` returns discovery and processing counts plus the outcome and review URL for each attempted pull request.

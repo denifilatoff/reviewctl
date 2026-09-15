@@ -69,3 +69,43 @@ func TestSignatureDeliveryRetryAndOwnership(t *testing.T) {
 		t.Fatal("signature retry invoked Codex")
 	}
 }
+
+func TestSignatureDeliveryRotatesPersistentFailures(t *testing.T) {
+	temp := t.TempDir()
+	bin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "missing-review"))
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	cfg := Config{Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}}}
+	store := openTestStore(t)
+	amount := 0.1
+	for _, id := range []string{"1", "2", "3"} {
+		attempt := Attempt{PullRequest: pr, Success: true, HeadSHA: "0123456789abcdef0123456789abcdef01234567",
+			SkillDigest: "digest", ReviewID: id, ReviewURL: pr.URL + "#pullrequestreview-" + id,
+			Cost: &ReviewCost{Model: "gpt-test", Effort: "low", USD: &amount}}
+		if err := store.queueSignature(attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failures := store.deliverSignatureBatch(context.Background(), cfg, 2); len(failures) != 2 {
+		t.Fatalf("first delivery failures = %+v", failures)
+	}
+	var errorMessage string
+	if err := store.db.QueryRow(`SELECT error_message FROM review_signatures WHERE review_id = '3'`).Scan(&errorMessage); err != nil {
+		t.Fatal(err)
+	}
+	if errorMessage != "" {
+		t.Fatalf("newest signature was attempted in the first batch: %q", errorMessage)
+	}
+	if failures := store.deliverSignatureBatch(context.Background(), cfg, 2); len(failures) != 2 {
+		t.Fatalf("second delivery failures = %+v", failures)
+	}
+	if err := store.db.QueryRow(`SELECT error_message FROM review_signatures WHERE review_id = '3'`).Scan(&errorMessage); err != nil {
+		t.Fatal(err)
+	}
+	if errorMessage == "" {
+		t.Fatal("persistent old failures starved a new signature")
+	}
+}

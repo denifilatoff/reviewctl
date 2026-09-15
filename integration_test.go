@@ -421,6 +421,9 @@ func TestDoctorReportsSequentialPrerequisites(t *testing.T) {
 			t.Fatalf("check %d = %#v", i, check)
 		}
 	}
+	if digest, _ := checks[3].(map[string]any)["skill_digest"].(string); !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("APM doctor did not report the installed skill digest: %#v", checks[3])
+	}
 	githubCalls, err := os.ReadFile(filepath.Join(temp, "github-calls"))
 	if err != nil || string(githubCalls) != "auth\nrepo:acme/service\nrepo:acme/other\n" {
 		t.Fatalf("GitHub doctor calls = %q, err = %v", githubCalls, err)
@@ -1010,6 +1013,9 @@ repositories:
 	if err := os.Remove(filepath.Join(temp, "published")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(filepath.Join(temp, "published.review.json")); err != nil {
+		t.Fatal(err)
+	}
 	headChangeEnv := append(append([]string{}, env...),
 		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
 	result = runCLI(t, headChangeEnv, binary, "--json", "run")
@@ -1280,7 +1286,7 @@ func TestProcessAttemptRejectsMissingOwnedDiscussionOutcome(t *testing.T) {
 		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 	}
-	result := ProcessAttempt(context.Background(), cfg, pr)
+	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
 	if result.Success || result.ErrorCode != "receipt_invalid" {
 		t.Fatalf("missing discussion outcome result: %+v", result)
 	}
@@ -1302,9 +1308,34 @@ func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
 		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 	}
-	result := ProcessAttempt(context.Background(), cfg, pr)
+	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
 	if !result.Success || result.ErrorCode != "" {
 		t.Fatalf("verified discussion outcome result: %+v", result)
+	}
+}
+
+func TestProcessAttemptRejectsRecoveryStateThatDisagreesWithGitHub(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
+
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
+	}
+	store := openTestStore(t)
+	if result := ProcessAttempt(context.Background(), cfg, store, pr); !result.Success || result.Recovered {
+		t.Fatalf("initial publication result: %+v", result)
+	}
+	t.Setenv("REVIEWCTL_FAKE_RECOVERED", "false")
+	result := ProcessAttempt(context.Background(), cfg, store, pr)
+	if result.Success || result.ErrorCode != "receipt_invalid" {
+		t.Fatalf("mismatched recovery result: %+v", result)
 	}
 }
 
@@ -1591,6 +1622,20 @@ func helperGH(args []string) {
 				"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": false}},
 			}}},
 		})
+		return
+	}
+	if len(args) == 4 && args[0] == "api" && strings.HasSuffix(args[1], "/reviews") &&
+		args[2] == "--paginate" && args[3] == "--slurp" {
+		path := os.Getenv("REVIEWCTL_FAKE_STATE") + ".review.json"
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			fmt.Print("[[]]")
+			return
+		}
+		if err != nil {
+			os.Exit(76)
+		}
+		fmt.Printf("[[%s]]", data)
 		return
 	}
 	for _, arg := range args {
@@ -1920,6 +1965,9 @@ func helperCodex(args []string) {
 	state := os.Getenv("REVIEWCTL_FAKE_STATE")
 	_, statErr := os.Stat(state)
 	recovered := statErr == nil
+	if forced := os.Getenv("REVIEWCTL_FAKE_RECOVERED"); forced != "" {
+		recovered = forced == "true"
+	}
 	if !recovered {
 		os.WriteFile(state, []byte("123"), 0o600)
 	}

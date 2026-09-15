@@ -67,6 +67,7 @@ type runResult struct {
 type doctorCheck struct {
 	Prerequisite string       `json:"prerequisite"`
 	Ready        bool         `json:"ready"`
+	SkillDigest  string       `json:"skill_digest,omitempty"`
 	Error        *resultError `json:"error,omitempty"`
 }
 
@@ -145,7 +146,10 @@ func doctorCommand(stdout io.Writer, jsonMode bool) int {
 		checks = append(checks, doctorResultFor("github", "github_failed", checkGitHubAccess(cfg)))
 	}
 	checks = append(checks, doctorResultFor("codex", "codex_failed", checkCodex()))
-	checks = append(checks, doctorResultFor("apm", "apm_failed", checkLockedSkills()))
+	digest, skillError := checkLockedSkills()
+	skillCheck := doctorResultFor("apm", "apm_failed", skillError)
+	skillCheck.SkillDigest = digest
+	checks = append(checks, skillCheck)
 	checks = append(checks, doctorResultFor("state", "state_failed", checkState()))
 	checks = append(checks, doctorResultFor("paths", "paths_failed", checkRequiredPaths()))
 	result := doctorResult{Command: "doctor", Status: "success", Prerequisites: checks}
@@ -213,16 +217,15 @@ func checkGitHubAccess(cfg Config) error {
 	return nil
 }
 
-func checkLockedSkills() error {
+func checkLockedSkills() (string, error) {
 	workspace, err := os.MkdirTemp("", "reviewctl-doctor-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(workspace)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = installLockedSkills(ctx, workspace)
-	return err
+	return installLockedSkills(ctx, workspace)
 }
 
 func checkState() error {
