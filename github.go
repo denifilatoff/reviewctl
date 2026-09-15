@@ -43,6 +43,7 @@ type githubReviewComment struct {
 	DatabaseID int64
 	Author     string
 	ReplyToID  int64
+	Body       string
 }
 
 type githubReviewThread struct {
@@ -51,7 +52,7 @@ type githubReviewThread struct {
 	Comments   []githubReviewComment
 }
 
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId}} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}`
 
 func listGitHubReviewThreads(ctx context.Context, pr PullRequest) ([]githubReviewThread, error) {
 	owner, name, ok := strings.Cut(pr.Repository, "/")
@@ -94,7 +95,8 @@ func decodeGitHubReviewThreads(data []byte) ([]githubReviewThread, error) {
 							IsResolved bool   `json:"isResolved"`
 							Comments   struct {
 								Nodes []struct {
-									DatabaseID int64 `json:"databaseId"`
+									DatabaseID int64  `json:"databaseId"`
+									Body       string `json:"body"`
 									Author     struct {
 										Login string `json:"login"`
 									} `json:"author"`
@@ -143,7 +145,7 @@ func decodeGitHubReviewThreads(data []byte) ([]githubReviewThread, error) {
 				replyTo = comment.ReplyTo.DatabaseID
 			}
 			threads[i].Comments = append(threads[i].Comments, githubReviewComment{
-				DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo,
+				DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
 			})
 		}
 	}
@@ -172,6 +174,9 @@ func validateDiscussionOutcomes(initial, current []githubReviewThread, login str
 		after, ok := final[before.ID]
 		if !ok {
 			return fmt.Errorf("discussion outcome readback mismatch")
+		}
+		if !commentsPreserved(before.Comments, after.Comments) {
+			return fmt.Errorf("pre-existing discussion comment changed during review")
 		}
 		if _, owned := expected[before.ID]; !owned &&
 			(after.IsResolved != before.IsResolved || len(newDiscussionReplyIDs(before, after, login)) != 0) {
@@ -209,6 +214,23 @@ func validateDiscussionOutcomes(initial, current []githubReviewThread, login str
 		}
 	}
 	return nil
+}
+
+func commentsPreserved(before, after []githubReviewComment) bool {
+	current := make(map[int64]githubReviewComment, len(after))
+	for _, comment := range after {
+		if _, duplicate := current[comment.DatabaseID]; duplicate {
+			return false
+		}
+		current[comment.DatabaseID] = comment
+	}
+	for _, comment := range before {
+		preserved, found := current[comment.DatabaseID]
+		if !found || preserved != comment {
+			return false
+		}
+	}
+	return true
 }
 
 func newDiscussionReplyIDs(before, thread githubReviewThread, login string) []int64 {

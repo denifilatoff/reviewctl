@@ -259,6 +259,35 @@ func TestValidateDiscussionOutcomesRejectsUnverifiedResults(t *testing.T) {
 	}
 }
 
+func TestValidateDiscussionOutcomesRejectsEditedOrRemovedComments(t *testing.T) {
+	initial := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer", Body: "original"},
+			{DatabaseID: 2, Author: "author", ReplyToID: 1, Body: "reply"},
+		},
+	}}
+	outcomes := []DiscussionOutcome{{ThreadID: "owned", Action: "preserved"}}
+
+	edited := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer", Body: "edited"},
+			{DatabaseID: 2, Author: "author", ReplyToID: 1, Body: "reply"},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, edited, "reviewer", outcomes); err == nil {
+		t.Fatal("accepted an edited pre-existing comment")
+	}
+
+	removed := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer", Body: "original"},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, removed, "reviewer", outcomes); err == nil {
+		t.Fatal("accepted a removed pre-existing comment")
+	}
+}
+
 func TestValidateDiscussionOutcomesRejectsUnownedThreadMutationsButAllowsNewFindings(t *testing.T) {
 	initial := []githubReviewThread{{
 		ID: "other", Comments: []githubReviewComment{{DatabaseID: 1, Author: "someone-else"}},
@@ -287,14 +316,15 @@ func TestValidateDiscussionOutcomesRejectsUnownedThreadMutationsButAllowsNewFind
 }
 
 func TestDecodeGitHubReviewThreadsPreservesOwnershipRepliesAndState(t *testing.T) {
-	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread","isResolved":true,"comments":{"nodes":[{"databaseId":1,"author":{"login":"reviewer"},"replyTo":null},{"databaseId":2,"author":{"login":"reviewer"},"replyTo":{"databaseId":1}}],"pageInfo":{"hasNextPage":false}}}],"pageInfo":{"hasNextPage":false}}}}}}`)
+	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread","isResolved":true,"comments":{"nodes":[{"databaseId":1,"author":{"login":"reviewer"},"replyTo":null,"body":"finding"},{"databaseId":2,"author":{"login":"reviewer"},"replyTo":{"databaseId":1},"body":"reply"}],"pageInfo":{"hasNextPage":false}}}],"pageInfo":{"hasNextPage":false}}}}}}`)
 
 	threads, err := decodeGitHubReviewThreads(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(threads) != 1 || threads[0].ID != "thread" || !threads[0].IsResolved ||
-		len(threads[0].Comments) != 2 || threads[0].Comments[1].ReplyToID != 1 {
+		len(threads[0].Comments) != 2 || threads[0].Comments[1].ReplyToID != 1 ||
+		threads[0].Comments[0].Body != "finding" || threads[0].Comments[1].Body != "reply" {
 		t.Fatalf("decoded threads = %+v", threads)
 	}
 }
