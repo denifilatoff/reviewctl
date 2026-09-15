@@ -58,13 +58,14 @@ func listGitHubReviewThreads(ctx context.Context, pr PullRequest) ([]githubRevie
 	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
 		return nil, fail("github_failed", "invalid GitHub repository %s", pr.Repository)
 	}
-	var data json.RawMessage
-	err := githubJSON(ctx, []string{"graphql", "-f", "query=" + reviewThreadsQuery, "-f", "owner=" + owner,
-		"-f", "name=" + name, "-F", fmt.Sprintf("number=%d", pr.Number)}, nil, &data)
-	if err != nil {
-		return nil, fail("github_failed", "read review threads: %v", err)
+	command := exec.CommandContext(ctx, "gh", "api", "graphql", "-f", "query="+reviewThreadsQuery, "-f",
+		"owner="+owner, "-f", "name="+name, "-F", fmt.Sprintf("number=%d", pr.Number))
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Run(); err != nil {
+		return nil, fail("github_failed", "read review threads: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	threads, err := decodeGitHubReviewThreads(data)
+	threads, err := decodeGitHubReviewThreads(stdout.Bytes())
 	if err != nil {
 		return nil, fail("github_failed", "read review threads: %v", err)
 	}

@@ -1262,7 +1262,7 @@ func TestProcessAttemptRejectsMissingOwnedDiscussionOutcome(t *testing.T) {
 		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 	}
-	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
+	result := ProcessAttempt(context.Background(), cfg, pr)
 	if result.Success || result.ErrorCode != "receipt_invalid" {
 		t.Fatalf("missing discussion outcome result: %+v", result)
 	}
@@ -1284,7 +1284,7 @@ func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
 		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 	}
-	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
+	result := ProcessAttempt(context.Background(), cfg, pr)
 	if !result.Success || result.ErrorCode != "" {
 		t.Fatalf("verified discussion outcome result: %+v", result)
 	}
