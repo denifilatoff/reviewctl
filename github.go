@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +37,197 @@ type GitHubPullRequest struct {
 	IsDraft bool
 	HeadSHA string
 	Author  string
+}
+
+type githubReviewComment struct {
+	DatabaseID int64
+	Author     string
+	ReplyToID  int64
+}
+
+type githubReviewThread struct {
+	ID         string
+	IsResolved bool
+	Comments   []githubReviewComment
+}
+
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId}} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}`
+
+func listGitHubReviewThreads(ctx context.Context, pr PullRequest) ([]githubReviewThread, error) {
+	owner, name, ok := strings.Cut(pr.Repository, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return nil, fail("github_failed", "invalid GitHub repository %s", pr.Repository)
+	}
+	var data json.RawMessage
+	err := githubJSON(ctx, []string{"graphql", "-f", "query=" + reviewThreadsQuery, "-f", "owner=" + owner,
+		"-f", "name=" + name, "-F", fmt.Sprintf("number=%d", pr.Number)}, nil, &data)
+	if err != nil {
+		return nil, fail("github_failed", "read review threads: %v", err)
+	}
+	threads, err := decodeGitHubReviewThreads(data)
+	if err != nil {
+		return nil, fail("github_failed", "read review threads: %v", err)
+	}
+	return threads, nil
+}
+
+func ownedDiscussionIDs(threads []githubReviewThread, login string) []string {
+	login = normalizeGitHubLogin(login)
+	var ids []string
+	for _, thread := range threads {
+		if len(thread.Comments) > 0 && normalizeGitHubLogin(thread.Comments[0].Author) == login {
+			ids = append(ids, thread.ID)
+		}
+	}
+	return ids
+}
+
+func decodeGitHubReviewThreads(data []byte) ([]githubReviewThread, error) {
+	var response struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									DatabaseID int64 `json:"databaseId"`
+									Author     struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									ReplyTo *struct {
+										DatabaseID int64 `json:"databaseId"`
+									} `json:"replyTo"`
+								} `json:"nodes"`
+								PageInfo struct {
+									HasNextPage bool `json:"hasNextPage"`
+								} `json:"pageInfo"`
+							} `json:"comments"`
+						} `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool `json:"hasNextPage"`
+						} `json:"pageInfo"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, err
+	}
+	if len(response.Errors) > 0 {
+		return nil, fmt.Errorf("GitHub GraphQL: %s", response.Errors[0].Message)
+	}
+	if response.Data.Repository == nil || response.Data.Repository.PullRequest == nil {
+		return nil, fmt.Errorf("GitHub returned no pull request")
+	}
+	wire := response.Data.Repository.PullRequest.ReviewThreads
+	if wire.PageInfo.HasNextPage {
+		return nil, fmt.Errorf("pull request has more than 100 review threads")
+	}
+	threads := make([]githubReviewThread, len(wire.Nodes))
+	for i, item := range wire.Nodes {
+		if item.ID == "" || item.Comments.PageInfo.HasNextPage || len(item.Comments.Nodes) == 0 {
+			return nil, fmt.Errorf("GitHub returned an incomplete review thread")
+		}
+		threads[i] = githubReviewThread{ID: item.ID, IsResolved: item.IsResolved}
+		for _, comment := range item.Comments.Nodes {
+			replyTo := int64(0)
+			if comment.ReplyTo != nil {
+				replyTo = comment.ReplyTo.DatabaseID
+			}
+			threads[i].Comments = append(threads[i].Comments, githubReviewComment{
+				DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo,
+			})
+		}
+	}
+	return threads, nil
+}
+
+func validateDiscussionOutcomes(initial, current []githubReviewThread, login string, outcomes []DiscussionOutcome) error {
+	if outcomes == nil {
+		return fmt.Errorf("discussion_outcomes is required")
+	}
+	login = normalizeGitHubLogin(login)
+	expected := make(map[string]githubReviewThread)
+	for _, thread := range initial {
+		if len(thread.Comments) > 0 && normalizeGitHubLogin(thread.Comments[0].Author) == login {
+			expected[thread.ID] = thread
+		}
+	}
+	if len(outcomes) != len(expected) {
+		return fmt.Errorf("discussion outcomes do not cover every owned discussion")
+	}
+	final := make(map[string]githubReviewThread, len(current))
+	for _, thread := range current {
+		final[thread.ID] = thread
+	}
+	seen := make(map[string]bool, len(outcomes))
+	for _, outcome := range outcomes {
+		if _, ok := expected[outcome.ThreadID]; !ok || seen[outcome.ThreadID] {
+			return fmt.Errorf("discussion outcome does not match an owned discussion")
+		}
+		seen[outcome.ThreadID] = true
+		thread, ok := final[outcome.ThreadID]
+		if !ok {
+			return fmt.Errorf("discussion outcome readback mismatch")
+		}
+		before := expected[outcome.ThreadID]
+		hasReply := validDiscussionReply(before, thread, outcome.ReplyID, login)
+		hasNewReply := hasNewDiscussionReply(before, thread, login)
+		switch outcome.Action {
+		case "resolved":
+			ok = thread.IsResolved && outcome.ReplyID == "" && !hasNewReply
+		case "resolved_with_reply":
+			ok = thread.IsResolved && hasReply
+		case "open_with_reply":
+			ok = !thread.IsResolved && hasReply
+		case "preserved":
+			ok = thread.IsResolved == before.IsResolved && outcome.ReplyID == "" && !hasNewReply
+		default:
+			ok = false
+		}
+		if !ok {
+			return fmt.Errorf("discussion outcome readback mismatch")
+		}
+	}
+	return nil
+}
+
+func validDiscussionReply(before, thread githubReviewThread, value json.Number, login string) bool {
+	id, err := strconv.ParseInt(string(value), 10, 64)
+	if err != nil || id <= 0 {
+		return false
+	}
+	for _, comment := range before.Comments {
+		if comment.DatabaseID == id {
+			return false
+		}
+	}
+	for _, comment := range thread.Comments {
+		if comment.DatabaseID == id && comment.ReplyToID != 0 && normalizeGitHubLogin(comment.Author) == login {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNewDiscussionReply(before, thread githubReviewThread, login string) bool {
+	existing := make(map[int64]bool, len(before.Comments))
+	for _, comment := range before.Comments {
+		existing[comment.DatabaseID] = true
+	}
+	for _, comment := range thread.Comments {
+		if !existing[comment.DatabaseID] && comment.ReplyToID != 0 && normalizeGitHubLogin(comment.Author) == login {
+			return true
+		}
+	}
+	return false
 }
 
 type pullRequestSnapshot struct {

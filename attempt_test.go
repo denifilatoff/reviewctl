@@ -34,6 +34,22 @@ func TestRunCommandPropagatesCancellation(t *testing.T) {
 	}
 }
 
+func TestTrustedInstructionAuthorizesOwnedDiscussionSynchronization(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	instruction := trustedInstruction(pr, "head", "digest", "/source", "/receipt", []string{"PRRT_owned"})
+	for _, required := range []string{
+		`Pre-existing owned discussion thread IDs: ["PRRT_owned"]`,
+		"Synchronize every listed discussion according to the installed skill",
+	} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("trusted instruction does not contain %q", required)
+		}
+	}
+	if strings.Contains(instruction, "any other GitHub state") {
+		t.Fatal("trusted instruction still forbids authorized discussion synchronization")
+	}
+}
+
 func TestValidateGitHubPullRequestFailsClosed(t *testing.T) {
 	cfg := Config{
 		Harness:        "codex",
@@ -126,6 +142,127 @@ func TestValidateReceiptAcceptsSuccessfulReviewOutcomes(t *testing.T) {
 		if err := ValidateReceipt(receipt, pr, receipt.HeadSHA, receipt.SkillDigest, false); err != nil {
 			t.Errorf("%s: %v", verdict, err)
 		}
+	}
+}
+
+func TestValidateDiscussionOutcomesRequiresEveryOwnedThread(t *testing.T) {
+	initial := []githubReviewThread{
+		{ID: "owned", Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}},
+		{ID: "other", Comments: []githubReviewComment{{DatabaseID: 2, Author: "someone-else"}}},
+	}
+	current := []githubReviewThread{
+		{ID: "owned", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}},
+		{ID: "other", Comments: []githubReviewComment{{DatabaseID: 2, Author: "someone-else"}}},
+	}
+
+	if err := validateDiscussionOutcomes(initial, current, "reviewer", []DiscussionOutcome{}); err == nil {
+		t.Fatal("accepted a receipt that omitted an owned discussion")
+	}
+	if err := validateDiscussionOutcomes(initial, current, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "resolved"},
+	}); err != nil {
+		t.Fatalf("rejected complete discussion outcomes: %v", err)
+	}
+}
+
+func TestValidateDiscussionOutcomesChecksRepliesAndFinalState(t *testing.T) {
+	initial := []githubReviewThread{
+		{ID: "accepted", Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}},
+		{ID: "clarified", Comments: []githubReviewComment{{DatabaseID: 2, Author: "reviewer"}}},
+		{ID: "remaining", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 3, Author: "reviewer"}}},
+		{ID: "unchanged", Comments: []githubReviewComment{{DatabaseID: 4, Author: "reviewer"}}},
+	}
+	current := []githubReviewThread{
+		{ID: "accepted", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}},
+		{ID: "clarified", IsResolved: true, Comments: []githubReviewComment{
+			{DatabaseID: 2, Author: "reviewer"},
+			{DatabaseID: 20, Author: "reviewer", ReplyToID: 2},
+		}},
+		{ID: "remaining", Comments: []githubReviewComment{
+			{DatabaseID: 3, Author: "reviewer"},
+			{DatabaseID: 30, Author: "reviewer", ReplyToID: 3},
+		}},
+		{ID: "unchanged", Comments: []githubReviewComment{{DatabaseID: 4, Author: "reviewer"}}},
+	}
+	outcomes := []DiscussionOutcome{
+		{ThreadID: "accepted", Action: "resolved"},
+		{ThreadID: "clarified", Action: "resolved_with_reply", ReplyID: "20"},
+		{ThreadID: "remaining", Action: "open_with_reply", ReplyID: "30"},
+		{ThreadID: "unchanged", Action: "preserved"},
+	}
+
+	if err := validateDiscussionOutcomes(initial, current, "reviewer", outcomes); err != nil {
+		t.Fatalf("rejected verified discussion lifecycle: %v", err)
+	}
+}
+
+func TestValidateDiscussionOutcomesRejectsUnverifiedResults(t *testing.T) {
+	if err := validateDiscussionOutcomes(nil, nil, "reviewer", nil); err == nil {
+		t.Fatal("accepted a receipt without discussion_outcomes")
+	}
+	initial := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}},
+	}}
+	foreignReply := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer"},
+			{DatabaseID: 2, Author: "someone-else", ReplyToID: 1},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, foreignReply, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "open_with_reply", ReplyID: "2"},
+	}); err == nil {
+		t.Fatal("accepted another user's reply")
+	}
+	oldReply := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer"},
+			{DatabaseID: 3, Author: "reviewer", ReplyToID: 1},
+		},
+	}}
+	if err := validateDiscussionOutcomes(oldReply, oldReply, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "open_with_reply", ReplyID: "3"},
+	}); err == nil {
+		t.Fatal("accepted an old reply as a new discussion outcome")
+	}
+	newReply := []githubReviewThread{{
+		ID: "owned", Comments: []githubReviewComment{
+			{DatabaseID: 1, Author: "reviewer"},
+			{DatabaseID: 4, Author: "reviewer", ReplyToID: 1},
+		},
+	}}
+	if err := validateDiscussionOutcomes(initial, newReply, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "preserved"},
+	}); err == nil {
+		t.Fatal("accepted a new reply as a preserved discussion")
+	}
+	resolved := []githubReviewThread{{
+		ID: "owned", IsResolved: true, Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}},
+	}}
+	if err := validateDiscussionOutcomes(initial, resolved, "reviewer", []DiscussionOutcome{
+		{ThreadID: "owned", Action: "preserved"},
+	}); err == nil {
+		t.Fatal("accepted a changed discussion as preserved")
+	}
+}
+
+func TestDecodeGitHubReviewThreadsPreservesOwnershipRepliesAndState(t *testing.T) {
+	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread","isResolved":true,"comments":{"nodes":[{"databaseId":1,"author":{"login":"reviewer"},"replyTo":null},{"databaseId":2,"author":{"login":"reviewer"},"replyTo":{"databaseId":1}}],"pageInfo":{"hasNextPage":false}}}],"pageInfo":{"hasNextPage":false}}}}}}`)
+
+	threads, err := decodeGitHubReviewThreads(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 1 || threads[0].ID != "thread" || !threads[0].IsResolved ||
+		len(threads[0].Comments) != 2 || threads[0].Comments[1].ReplyToID != 1 {
+		t.Fatalf("decoded threads = %+v", threads)
+	}
+}
+
+func TestDecodeGitHubReviewThreadsRejectsIncompletePagination(t *testing.T) {
+	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}}}`)
+	if _, err := decodeGitHubReviewThreads(payload); err == nil {
+		t.Fatal("accepted a partial review-thread page")
 	}
 }
 

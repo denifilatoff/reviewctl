@@ -1247,6 +1247,49 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 	}
 }
 
+func TestProcessAttemptRejectsMissingOwnedDiscussionOutcome(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
+	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
+
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
+	}
+	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
+	if result.Success || result.ErrorCode != "receipt_invalid" {
+		t.Fatalf("missing discussion outcome result: %+v", result)
+	}
+}
+
+func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
+	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
+	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved")
+
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
+	}
+	result := ProcessAttempt(context.Background(), cfg, openTestStore(t), pr)
+	if !result.Success || result.ErrorCode != "" {
+		t.Fatalf("verified discussion outcome result: %+v", result)
+	}
+}
+
 func TestAgentStyleBlackBoxAcceptance(t *testing.T) {
 	temp := t.TempDir()
 	binary := filepath.Join(temp, "reviewctl")
@@ -1509,6 +1552,29 @@ func helperGit(args []string) {
 }
 
 func helperGH(args []string) {
+	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		nodes := []any{}
+		if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
+			resolved := false
+			if os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION") == "resolved" {
+				_, err := os.Stat(os.Getenv("REVIEWCTL_FAKE_STATE"))
+				resolved = err == nil
+			}
+			nodes = append(nodes, map[string]any{
+				"id": "PRRT_owned", "isResolved": resolved,
+				"comments": map[string]any{
+					"nodes":    []any{map[string]any{"databaseId": 1, "author": map[string]string{"login": "reviewer"}, "replyTo": nil}},
+					"pageInfo": map[string]bool{"hasNextPage": false},
+				},
+			})
+		}
+		json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+				"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": false}},
+			}}},
+		})
+		return
+	}
 	rawTarget := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
 	rawView := rawTarget == "view" && len(args) == 5 && args[0] == "pr" && args[1] == "view" &&
 		args[2] == "https://github.com/acme/service/pull/7" &&
@@ -1792,7 +1858,11 @@ func helperCodex(args []string) {
 		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
 		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
-		Recovered: recovered,
+		Recovered: recovered, DiscussionOutcomes: []DiscussionOutcome{},
+	}
+	if action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION"); action != "" {
+		receipt.DiscussionOutcomes = append(receipt.DiscussionOutcomes,
+			DiscussionOutcome{ThreadID: "PRRT_owned", Action: action})
 	}
 	if head := os.Getenv("REVIEWCTL_FAKE_RECEIPT_HEAD"); head != "" {
 		receipt.HeadSHA = head
