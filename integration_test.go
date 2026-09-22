@@ -1371,6 +1371,50 @@ func TestProcessAttemptRejectsRecoveryStateThatDisagreesWithGitHub(t *testing.T)
 	}
 }
 
+func TestProcessAttemptRetainsQueueWhenExternalInputChanges(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "race")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_COUNTER", filepath.Join(temp, "input-counter"))
+
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	digest, ids, revision := mergeExternalInput("", nil,
+		githubExternalInput{Body: "description", MessageIDs: []string{"A"}})
+	pr.InputRevision = revision
+	store := openTestStore(t)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	snapshot := pullRequestSnapshot{PullRequest: pr, HeadSHA: "0123456789abcdef0123456789abcdef01234567",
+		DescriptionDigest: digest, MessageIDs: ids}
+	if _, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{repository},
+	}
+	result := ProcessAttempt(context.Background(), cfg, store, pr)
+	if result.Success || result.ErrorCode != "input_changed" {
+		t.Fatalf("input race result = %+v", result)
+	}
+	if err := store.Finish(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := store.Snapshot(context.Background())
+	want := externalInputRevision(digest, []string{"A", "B"})
+	if err != nil || len(queue) != 1 || queue[0].InputRevision != want {
+		t.Fatalf("input race queue = %+v, err=%v, want revision=%q", queue, err, want)
+	}
+}
+
 func TestAgentStyleBlackBoxAcceptance(t *testing.T) {
 	temp := t.TempDir()
 	binary := filepath.Join(temp, "reviewctl")
@@ -1634,8 +1678,8 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
-		if mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT"); mode != "" ||
-			strings.Contains(strings.Join(args, " "), "ExternalInput") {
+		if strings.Contains(strings.Join(args, " "), "ExternalInput") {
+			mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT")
 			if mode == "" {
 				mode = "empty"
 			}
@@ -1877,7 +1921,21 @@ func helperGitHubExternalInput(args []string, mode string) {
 		comments := page(nil, false, "")
 		reviews := page(nil, false, "")
 		threads := page(nil, false, "")
-		if mode != "empty" && mode != "missing-viewer" {
+		if mode == "race" {
+			counterPath := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_COUNTER")
+			count := 0
+			if value, err := os.ReadFile(counterPath); err == nil {
+				count, _ = strconv.Atoi(string(value))
+			}
+			if os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600) != nil {
+				os.Exit(93)
+			}
+			nodes := []any{message("A", "alice", "User", "first")}
+			if count > 0 {
+				nodes = append(nodes, message("B", "bob", "User", "second"))
+			}
+			comments = page(nodes, false, "")
+		} else if mode != "empty" && mode != "missing-viewer" {
 			comments = page([]any{
 				message("IC1", "alice", "User", "general"),
 				message("BOT", "robot", "Bot", "automated"),
@@ -2081,7 +2139,8 @@ func helperCodex(args []string) {
 	}
 	receipt := Receipt{
 		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
-		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
+		InputRevision: fields["External input revision"], SkillDigest: fields["Skill digest"], Verdict: verdict,
+		ReviewID:  "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
 		Recovered: recovered, DiscussionOutcomes: []DiscussionOutcome{},
 	}

@@ -323,8 +323,8 @@ func (s *Store) EnqueueMany(ctx context.Context, pullRequests []PullRequest) ([]
 	queuedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for i, pr := range pullRequests {
 		result, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at)
-			VALUES (?, ?, ?, ?, ?)`, pr.Provider, pr.Repository, pr.Number, pr.URL, queuedAt)
+			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at, input_revision)
+			VALUES (?, ?, ?, ?, ?, ?)`, pr.Provider, pr.Repository, pr.Number, pr.URL, queuedAt, pr.InputRevision)
 		if err != nil {
 			return nil, fmt.Errorf("enqueue pull request: %w", err)
 		}
@@ -373,7 +373,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 		return nil, nil, fmt.Errorf("read queue: %w", err)
 	}
 	rows, err = tx.QueryContext(ctx, `
-		SELECT provider, repository, change_number, url, head_sha, skill_digest, started_at, finished_at,
+		SELECT provider, repository, change_number, url, head_sha, input_revision, skill_digest, started_at, finished_at,
 			success, verdict, review_id, review_url, error_code, error_message, cost_json FROM history ORDER BY id DESC LIMIT ?`,
 		historyLimit)
 	if err != nil {
@@ -384,7 +384,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 		var attempt Attempt
 		var started, finished, cost string
 		if err := rows.Scan(&attempt.Provider, &attempt.Repository, &attempt.Number, &attempt.URL, &attempt.HeadSHA,
-			&attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
+			&attempt.InputRevision, &attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
 			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage, &cost); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("read history entry: %w", err)
@@ -423,10 +423,11 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO history(provider, repository, change_number, url, head_sha, skill_digest,
+		INSERT INTO history(provider, repository, change_number, url, head_sha, input_revision, skill_digest,
 			started_at, finished_at, success, verdict, review_id, review_url, error_code, error_message, cost_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		attempt.Provider, attempt.Repository, attempt.Number, attempt.URL, attempt.HeadSHA, attempt.SkillDigest,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		attempt.Provider, attempt.Repository, attempt.Number, attempt.URL, attempt.HeadSHA, attempt.InputRevision,
+		attempt.SkillDigest,
 		attempt.StartedAt.UTC().Format(time.RFC3339Nano), attempt.FinishedAt.UTC().Format(time.RFC3339Nano),
 		attempt.Success, attempt.Verdict, attempt.ReviewID, attempt.ReviewURL, attempt.ErrorCode,
 		bounded(attempt.ErrorMessage, 512), cost); err != nil {
