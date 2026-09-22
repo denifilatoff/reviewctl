@@ -1170,6 +1170,77 @@ repositories:
 	}
 }
 
+func TestFullProcessQueuesPRContentEvents(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_DIR", discoveryDir)
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "file")
+	externalPath := filepath.Join(temp, "external-input.json")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_FILE", externalPath)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{{
+		URL: "https://github.com/acme/service/pull/7", Number: 7, State: "OPEN", HeadRefOID: "a",
+		Author: fakeDiscoveryAuthor{Login: "dependabot[bot]"},
+	}})
+	store := openTestStore(t)
+	cfg := Config{TrustedAuthors: []string{"dependabot[bot]"}, Repositories: []Repository{repository}}
+	input := fakeExternalInput{Body: "initial"}
+	writeExternalInput(t, externalPath, input)
+	if result := discoverRepositories(context.Background(), cfg, store); result[0].Enqueued != 0 {
+		t.Fatalf("initial discovery = %+v", result)
+	}
+
+	assertEvent := func(name string, want bool) {
+		t.Helper()
+		writeExternalInput(t, externalPath, input)
+		result := discoverRepositories(context.Background(), cfg, store)
+		wantCount := 0
+		if want {
+			wantCount = 1
+		}
+		if result[0].Status != "success" || result[0].Enqueued != wantCount {
+			t.Fatalf("%s discovery = %+v, want enqueued=%d", name, result, wantCount)
+		}
+		queue, err := store.Snapshot(context.Background())
+		if err != nil || len(queue) != wantCount {
+			t.Fatalf("%s queue = %+v, err=%v", name, queue, err)
+		}
+		if want {
+			now := time.Now()
+			if err := store.Finish(context.Background(), Attempt{
+				PullRequest: queue[0], HeadSHA: "a", SkillDigest: "test", StartedAt: now, FinishedAt: now,
+				Success: true, Verdict: "APPROVE", ReviewID: name, ReviewURL: "https://example.test/" + name,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	input.Body = "changed"
+	assertEvent("description", true)
+	input.Comments = append(input.Comments, fakeExternalMessage{ID: "G1", Body: "general", Login: "alice", Type: "User"})
+	assertEvent("general", true)
+	input.Reviews = append(input.Reviews, fakeExternalMessage{ID: "R1", Body: "review", Login: "bob", Type: "User"})
+	assertEvent("review", true)
+	input.Threads = append(input.Threads, fakeExternalThread{ID: "T1", Comments: []fakeExternalMessage{
+		{ID: "I1", Body: "inline", Login: "carol", Type: "User"},
+	}})
+	assertEvent("inline", true)
+	input.Threads[0].Comments = append(input.Threads[0].Comments,
+		fakeExternalMessage{ID: "P1", Body: "reply", Login: "dave", Type: "User"})
+	assertEvent("reply", true)
+	input.Comments = append(input.Comments,
+		fakeExternalMessage{ID: "B1", Body: "bot", Login: "robot", Type: "Bot"},
+		fakeExternalMessage{ID: "S1", Body: "self", Login: "reviewer", Type: "User"})
+	assertEvent("excluded-authors", false)
+}
+
 func TestGitHubDiscoverySentinelPreservesBaseline(t *testing.T) {
 	temp := t.TempDir()
 	fakeBin := installProcessHelpers(t, temp)
@@ -1253,6 +1324,25 @@ type fakeDiscoveryAuthor struct {
 	Login string `json:"login"`
 }
 
+type fakeExternalMessage struct {
+	ID    string `json:"id"`
+	Body  string `json:"body"`
+	Login string `json:"login"`
+	Type  string `json:"type"`
+}
+
+type fakeExternalThread struct {
+	ID       string                `json:"id"`
+	Comments []fakeExternalMessage `json:"comments"`
+}
+
+type fakeExternalInput struct {
+	Body     string                `json:"body"`
+	Comments []fakeExternalMessage `json:"comments"`
+	Reviews  []fakeExternalMessage `json:"reviews"`
+	Threads  []fakeExternalThread  `json:"threads"`
+}
+
 func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fakeDiscoveryPR) {
 	t.Helper()
 	data, err := json.Marshal(snapshot)
@@ -1260,6 +1350,17 @@ func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fa
 		t.Fatal(err)
 	}
 	writeDiscoveryFixture(t, dir, repository, string(data))
+}
+
+func writeExternalInput(t *testing.T, path string, input fakeExternalInput) {
+	t.Helper()
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
@@ -1915,13 +2016,37 @@ func helperGitHubExternalInput(args []string, mode string) {
 	switch {
 	case strings.Contains(joined, "ExternalInputInitial"):
 		viewer := any(map[string]string{"login": "reviewer"})
+		body := "description"
 		if mode == "missing-viewer" {
 			viewer = nil
 		}
 		comments := page(nil, false, "")
 		reviews := page(nil, false, "")
 		threads := page(nil, false, "")
-		if mode == "race" {
+		if mode == "file" {
+			content, err := os.ReadFile(os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_FILE"))
+			var input fakeExternalInput
+			if err != nil || json.Unmarshal(content, &input) != nil {
+				os.Exit(93)
+			}
+			body = input.Body
+			messageNodes := func(input []fakeExternalMessage) []any {
+				nodes := make([]any, 0, len(input))
+				for _, item := range input {
+					nodes = append(nodes, message(item.ID, item.Login, item.Type, item.Body))
+				}
+				return nodes
+			}
+			comments = page(messageNodes(input.Comments), false, "")
+			reviews = page(messageNodes(input.Reviews), false, "")
+			threadNodes := make([]any, 0, len(input.Threads))
+			for _, thread := range input.Threads {
+				threadNodes = append(threadNodes, map[string]any{
+					"id": thread.ID, "comments": page(messageNodes(thread.Comments), false, ""),
+				})
+			}
+			threads = page(threadNodes, false, "")
+		} else if mode == "race" {
 			counterPath := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_COUNTER")
 			count := 0
 			if value, err := os.ReadFile(counterPath); err == nil {
@@ -1950,7 +2075,7 @@ func helperGitHubExternalInput(args []string, mode string) {
 		data = map[string]any{
 			"viewer": viewer,
 			"repository": map[string]any{"pullRequest": map[string]any{
-				"body": "description", "comments": comments, "reviews": reviews, "reviewThreads": threads,
+				"body": body, "comments": comments, "reviews": reviews, "reviewThreads": threads,
 			}},
 		}
 	case strings.Contains(joined, "ExternalInputIssueComments"):

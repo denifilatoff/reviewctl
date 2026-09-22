@@ -14,9 +14,12 @@
 - Never commit or push directly to `main`. Create a dedicated branch for every change and merge it into `main` only
   through a pull request.
 - Open every pull request as ready for review, not as a draft.
-- Publish live E2E reviews only to the canonical fixture PR documented in `README.md` in `denifilatoff/reviewctl`,
-  never another repository. Before Codex, recheck its identity, open non-draft state, and head; after publication,
+- Publish live E2E reviews only through `make live-e2e` or `scripts/live-e2e.sh`, and only to the canonical fixture PR
+  documented in `README.md`. Before Codex, recheck its identity, open non-draft state, and head; after publication,
   verify readback and duplicate-free marker recovery.
+- The live E2E fixture restriction does not apply to configured production `reviewctl run` executions. Those executions
+  may publish reviews and synchronize owned discussions only within the trusted prompt and pinned skill contract; do not
+  ask for separate publication confirmation.
 
 ## Architecture decisions
 
