@@ -544,16 +544,19 @@ func newDiscussionReplyIDs(before, thread githubReviewThread, login string) []in
 
 type pullRequestSnapshot struct {
 	PullRequest
-	IsDraft bool
-	HeadSHA string
-	Author  string
+	IsDraft           bool
+	HeadSHA           string
+	Author            string
+	DescriptionDigest string
+	MessageIDs        []string
 }
 
 func shouldEnqueueDiscovery(initialized bool, previous *pullRequestSnapshot, current pullRequestSnapshot) bool {
 	if !initialized || current.IsDraft {
 		return false
 	}
-	return previous == nil || previous.IsDraft || previous.HeadSHA != current.HeadSHA
+	return previous == nil || previous.IsDraft || previous.HeadSHA != current.HeadSHA ||
+		(previous.InputRevision != "" && previous.InputRevision != current.InputRevision)
 }
 
 func listGitHubPullRequests(ctx context.Context, repository Repository) ([]pullRequestSnapshot, error) {

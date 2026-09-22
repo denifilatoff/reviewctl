@@ -1634,7 +1634,11 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
-		if mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT"); mode != "" {
+		if mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT"); mode != "" ||
+			strings.Contains(strings.Join(args, " "), "ExternalInput") {
+			if mode == "" {
+				mode = "empty"
+			}
 			helperGitHubExternalInput(args, mode)
 			return
 		}
@@ -1870,20 +1874,25 @@ func helperGitHubExternalInput(args []string, mode string) {
 		if mode == "missing-viewer" {
 			viewer = nil
 		}
+		comments := page(nil, false, "")
+		reviews := page(nil, false, "")
+		threads := page(nil, false, "")
+		if mode != "empty" && mode != "missing-viewer" {
+			comments = page([]any{
+				message("IC1", "alice", "User", "general"),
+				message("BOT", "robot", "Bot", "automated"),
+				message("SELF", "reviewer", "User", "own"),
+				message("EMPTY", "alice", "User", "   "),
+			}, true, "C1")
+			reviews = page([]any{message("R1", "bob", "User", "review")}, true, "RV1")
+			threads = page([]any{map[string]any{
+				"id": "T1", "comments": page([]any{message("RC1", "carol", "User", "inline")}, true, "TC1"),
+			}}, true, "TH1")
+		}
 		data = map[string]any{
 			"viewer": viewer,
 			"repository": map[string]any{"pullRequest": map[string]any{
-				"body": "description",
-				"comments": page([]any{
-					message("IC1", "alice", "User", "general"),
-					message("BOT", "robot", "Bot", "automated"),
-					message("SELF", "reviewer", "User", "own"),
-					message("EMPTY", "alice", "User", "   "),
-				}, true, "C1"),
-				"reviews": page([]any{message("R1", "bob", "User", "review")}, true, "RV1"),
-				"reviewThreads": page([]any{map[string]any{
-					"id": "T1", "comments": page([]any{message("RC1", "carol", "User", "inline")}, true, "TC1"),
-				}}, true, "TH1"),
+				"body": "description", "comments": comments, "reviews": reviews, "reviewThreads": threads,
 			}},
 		}
 	case strings.Contains(joined, "ExternalInputIssueComments"):

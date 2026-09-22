@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -94,29 +95,31 @@ func OpenStore(path string) (*Store, error) {
 			return nil, fmt.Errorf("initialize state: %w", err)
 		}
 	}
-	var exists int
-	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = 'cost_json'`).Scan(&exists); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("inspect history schema: %w", err)
-	}
-	if exists == 0 {
-		if _, err := db.Exec(`ALTER TABLE history ADD COLUMN cost_json TEXT NOT NULL DEFAULT ''`); err != nil {
-			// Concurrent readers may have applied the same additive migration.
-			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = 'cost_json'`).Scan(&exists); checkErr != nil || exists == 0 {
-				db.Close()
-				return nil, fmt.Errorf("migrate history: %w", err)
-			}
+	for _, migration := range []struct{ table, column, definition string }{
+		{"history", "cost_json", "TEXT NOT NULL DEFAULT ''"},
+		{"history", "input_revision", "TEXT NOT NULL DEFAULT ''"},
+		{"review_signatures", "attempted_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"queue", "input_revision", "TEXT NOT NULL DEFAULT ''"},
+		{"pull_request_baselines", "description_digest", "TEXT NOT NULL DEFAULT ''"},
+		{"pull_request_baselines", "message_ids_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"pull_request_baselines", "input_revision", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var exists int
+		query := fmt.Sprintf("SELECT count(*) FROM pragma_table_info('%s') WHERE name = ?", migration.table)
+		if err := db.QueryRow(query, migration.column).Scan(&exists); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("inspect %s schema: %w", migration.table, err)
 		}
-	}
-	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("inspect signature schema: %w", err)
-	}
-	if exists == 0 {
-		if _, err := db.Exec(`ALTER TABLE review_signatures ADD COLUMN attempted_at INTEGER NOT NULL DEFAULT 0`); err != nil {
-			if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('review_signatures') WHERE name = 'attempted_at'`).Scan(&exists); checkErr != nil || exists == 0 {
+		if exists != 0 {
+			continue
+		}
+		statement := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+			migration.table, migration.column, migration.definition)
+		if _, err := db.Exec(statement); err != nil {
+			// Concurrent readers may have applied the same additive migration.
+			if checkErr := db.QueryRow(query, migration.column).Scan(&exists); checkErr != nil || exists == 0 {
 				db.Close()
-				return nil, fmt.Errorf("migrate signature queue: %w", err)
+				return nil, fmt.Errorf("migrate %s: %w", migration.table, err)
 			}
 		}
 	}
@@ -147,7 +150,8 @@ func (s *Store) ApplyDiscoverySnapshot(
 		return 0, fmt.Errorf("read repository baseline: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT change_number, is_draft, head_sha FROM pull_request_baselines
+		SELECT change_number, is_draft, head_sha, description_digest, message_ids_json, input_revision
+		FROM pull_request_baselines
 		WHERE provider = ? AND repository = ?`, repository.Provider, repository.Repository)
 	if err != nil {
 		return 0, fmt.Errorf("read pull request baseline: %w", err)
@@ -155,10 +159,16 @@ func (s *Store) ApplyDiscoverySnapshot(
 	previous := make(map[int64]pullRequestSnapshot)
 	for rows.Next() {
 		var item pullRequestSnapshot
+		var messageIDs string
 		item.Provider, item.Repository = repository.Provider, repository.Repository
-		if err := rows.Scan(&item.Number, &item.IsDraft, &item.HeadSHA); err != nil {
+		if err := rows.Scan(&item.Number, &item.IsDraft, &item.HeadSHA, &item.DescriptionDigest, &messageIDs,
+			&item.InputRevision); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("read pull request baseline: %w", err)
+		}
+		if err := json.Unmarshal([]byte(messageIDs), &item.MessageIDs); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("decode pull request baseline: %w", err)
 		}
 		previous[item.Number] = item
 	}
@@ -168,6 +178,29 @@ func (s *Store) ApplyDiscoverySnapshot(
 	}
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("read pull request baseline: %w", err)
+	}
+	for i := range snapshot {
+		current := &snapshot[i]
+		if current.IsDraft || current.DescriptionDigest == "" {
+			continue
+		}
+		unique := make(map[string]bool, len(current.MessageIDs))
+		if old, found := previous[current.Number]; found {
+			for _, id := range old.MessageIDs {
+				unique[id] = true
+			}
+		}
+		for _, id := range current.MessageIDs {
+			if id != "" {
+				unique[id] = true
+			}
+		}
+		current.MessageIDs = current.MessageIDs[:0]
+		for id := range unique {
+			current.MessageIDs = append(current.MessageIDs, id)
+		}
+		sort.Strings(current.MessageIDs)
+		current.InputRevision = externalInputRevision(current.DescriptionDigest, current.MessageIDs)
 	}
 	queuedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	enqueued := 0
@@ -181,8 +214,9 @@ func (s *Store) ApplyDiscoverySnapshot(
 			continue
 		}
 		result, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at)
-			VALUES (?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.URL, queuedAt)
+			INSERT OR IGNORE INTO queue(provider, repository, change_number, url, queued_at, input_revision)
+			VALUES (?, ?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.URL, queuedAt,
+			current.InputRevision)
 		if err != nil {
 			return 0, fmt.Errorf("enqueue discovered pull request: %w", err)
 		}
@@ -191,16 +225,27 @@ func (s *Store) ApplyDiscoverySnapshot(
 			return 0, fmt.Errorf("read discovery enqueue result: %w", err)
 		}
 		enqueued += int(rows)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE queue SET input_revision = ?
+			WHERE provider = ? AND repository = ? AND change_number = ?`, current.InputRevision,
+			current.Provider, current.Repository, current.Number); err != nil {
+			return 0, fmt.Errorf("update discovered pull request: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pull_request_baselines WHERE provider = ? AND repository = ?`,
 		repository.Provider, repository.Repository); err != nil {
 		return 0, fmt.Errorf("replace pull request baseline: %w", err)
 	}
 	for _, current := range snapshot {
+		messageIDs, err := json.Marshal(current.MessageIDs)
+		if err != nil {
+			return 0, fmt.Errorf("encode pull request baseline: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO pull_request_baselines(provider, repository, change_number, is_draft, head_sha)
-			VALUES (?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.IsDraft,
-			current.HeadSHA); err != nil {
+			INSERT INTO pull_request_baselines(provider, repository, change_number, is_draft, head_sha,
+				description_digest, message_ids_json, input_revision)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, current.Provider, current.Repository, current.Number, current.IsDraft,
+			current.HeadSHA, current.DescriptionDigest, string(messageIDs), current.InputRevision); err != nil {
 			return 0, fmt.Errorf("write pull request baseline: %w", err)
 		}
 	}
@@ -213,6 +258,57 @@ func (s *Store) ApplyDiscoverySnapshot(
 		return 0, fmt.Errorf("commit discovery transaction: %w", err)
 	}
 	return enqueued, nil
+}
+
+func (s *Store) MergeQueuedInput(
+	ctx context.Context, pr PullRequest, current githubExternalInput,
+) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("start input transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var previousJSON string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT message_ids_json FROM pull_request_baselines
+		WHERE provider = ? AND repository = ? AND change_number = ?`,
+		pr.Provider, pr.Repository, pr.Number).Scan(&previousJSON); err != nil {
+		return "", fmt.Errorf("read pull request input: %w", err)
+	}
+	var previousIDs []string
+	if err := json.Unmarshal([]byte(previousJSON), &previousIDs); err != nil {
+		return "", fmt.Errorf("decode pull request input: %w", err)
+	}
+	descriptionDigest, messageIDs, revision := mergeExternalInput("", previousIDs, current)
+	messageIDsJSON, err := json.Marshal(messageIDs)
+	if err != nil {
+		return "", fmt.Errorf("encode pull request input: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE pull_request_baselines
+		SET description_digest = ?, message_ids_json = ?, input_revision = ?
+		WHERE provider = ? AND repository = ? AND change_number = ?`,
+		descriptionDigest, string(messageIDsJSON), revision, pr.Provider, pr.Repository, pr.Number); err != nil {
+		return "", fmt.Errorf("update pull request input: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE queue SET input_revision = ?
+		WHERE provider = ? AND repository = ? AND change_number = ?`,
+		revision, pr.Provider, pr.Repository, pr.Number)
+	if err != nil {
+		return "", fmt.Errorf("update queued input: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("read queued input update: %w", err)
+	}
+	if updated != 1 {
+		return "", fmt.Errorf("queued pull request input is missing")
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit input transaction: %w", err)
+	}
+	return revision, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -256,14 +352,14 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT provider, repository, change_number, url FROM queue ORDER BY id`)
+		SELECT provider, repository, change_number, url, input_revision FROM queue ORDER BY id`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read queue: %w", err)
 	}
 	queue := make([]PullRequest, 0)
 	for rows.Next() {
 		var pr PullRequest
-		if err := rows.Scan(&pr.Provider, &pr.Repository, &pr.Number, &pr.URL); err != nil {
+		if err := rows.Scan(&pr.Provider, &pr.Repository, &pr.Number, &pr.URL, &pr.InputRevision); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("read queue entry: %w", err)
 		}
