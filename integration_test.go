@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -140,6 +141,37 @@ func TestRawGitHubCommandsCleanNonzeroDescendants(t *testing.T) {
 				t.Fatalf("raw GitHub descendant survived cleanup: before=%q after=%q err=%v", heartbeat, after, err)
 			}
 		})
+	}
+}
+
+func TestReadGitHubExternalInputPagination(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "1")
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+
+	input, err := readGitHubExternalInput(context.Background(), pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"IC1", "IC2", "R1", "R2", "RC1", "RC2", "RP1"}
+	if input.Body != "description" || !reflect.DeepEqual(input.MessageIDs, want) {
+		t.Fatalf("external input = %+v, want body and IDs %v", input, want)
+	}
+}
+
+func TestReadGitHubExternalInputRejectsMissingViewer(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "missing-viewer")
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+
+	if _, err := readGitHubExternalInput(context.Background(), pr); err == nil {
+		t.Fatal("accepted external input without an authenticated viewer")
 	}
 }
 
@@ -1602,6 +1634,10 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		if mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT"); mode != "" {
+			helperGitHubExternalInput(args, mode)
+			return
+		}
 		nodes := []any{}
 		if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
 			resolved := false
@@ -1813,6 +1849,65 @@ func helperGH(args []string) {
 		return
 	}
 	os.Exit(92)
+}
+
+func helperGitHubExternalInput(args []string, mode string) {
+	joined := strings.Join(args, " ")
+	message := func(id, login, actor, body string) map[string]any {
+		return map[string]any{
+			"id": id, "body": body, "author": map[string]string{"login": login, "__typename": actor},
+		}
+	}
+	page := func(nodes []any, next bool, cursor string) map[string]any {
+		return map[string]any{
+			"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": next, "endCursor": cursor},
+		}
+	}
+	data := map[string]any{}
+	switch {
+	case strings.Contains(joined, "ExternalInputInitial"):
+		viewer := any(map[string]string{"login": "reviewer"})
+		if mode == "missing-viewer" {
+			viewer = nil
+		}
+		data = map[string]any{
+			"viewer": viewer,
+			"repository": map[string]any{"pullRequest": map[string]any{
+				"body": "description",
+				"comments": page([]any{
+					message("IC1", "alice", "User", "general"),
+					message("BOT", "robot", "Bot", "automated"),
+					message("SELF", "reviewer", "User", "own"),
+					message("EMPTY", "alice", "User", "   "),
+				}, true, "C1"),
+				"reviews": page([]any{message("R1", "bob", "User", "review")}, true, "RV1"),
+				"reviewThreads": page([]any{map[string]any{
+					"id": "T1", "comments": page([]any{message("RC1", "carol", "User", "inline")}, true, "TC1"),
+				}}, true, "TH1"),
+			}},
+		}
+	case strings.Contains(joined, "ExternalInputIssueComments"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"comments": page([]any{message("IC2", "alice", "User", "next general")}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputReviews"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"reviews": page([]any{message("R2", "bob", "User", "next review")}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputReviewThreads"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"reviewThreads": page([]any{map[string]any{
+				"id": "T2", "comments": page([]any{message("RC2", "dave", "User", "next inline")}, false, ""),
+			}}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputThreadComments"):
+		data = map[string]any{"node": map[string]any{
+			"comments": page([]any{message("RP1", "erin", "User", "reply")}, false, ""),
+		}}
+	default:
+		os.Exit(93)
+	}
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"data": data})
 }
 
 func appendDoctorCall(path, call string) {

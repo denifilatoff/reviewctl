@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -50,6 +52,299 @@ type githubReviewThread struct {
 	ID         string
 	IsResolved bool
 	Comments   []githubReviewComment
+}
+
+type githubExternalInput struct {
+	Body       string
+	MessageIDs []string
+}
+
+type githubExternalActor struct {
+	Login    string `json:"login"`
+	Typename string `json:"__typename"`
+}
+
+type githubExternalMessage struct {
+	ID     string               `json:"id"`
+	Body   string               `json:"body"`
+	Author *githubExternalActor `json:"author"`
+}
+
+type githubExternalPageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type githubExternalMessageConnection struct {
+	Nodes    []githubExternalMessage `json:"nodes"`
+	PageInfo githubExternalPageInfo  `json:"pageInfo"`
+}
+
+type githubExternalThread struct {
+	ID       string                          `json:"id"`
+	Comments githubExternalMessageConnection `json:"comments"`
+}
+
+type githubExternalThreadConnection struct {
+	Nodes    []githubExternalThread `json:"nodes"`
+	PageInfo githubExternalPageInfo `json:"pageInfo"`
+}
+
+type githubGraphQLError struct {
+	Message string `json:"message"`
+}
+
+const externalInputInitialQuery = `query ExternalInputInitial($owner:String!,$name:String!,$number:Int!){viewer{login}repository(owner:$owner,name:$name){pullRequest(number:$number){body comments(first:100){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}reviews(first:100){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}reviewThreads(first:100){nodes{id comments(first:100){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}}pageInfo{hasNextPage endCursor}}}}}`
+
+const externalInputIssueCommentsQuery = `query ExternalInputIssueComments($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){comments(first:100,after:$cursor){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}}}}`
+
+const externalInputReviewsQuery = `query ExternalInputReviews($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(first:100,after:$cursor){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}}}}`
+
+const externalInputReviewThreadsQuery = `query ExternalInputReviewThreads($owner:String!,$name:String!,$number:Int!,$cursor:String!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id comments(first:100){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}}pageInfo{hasNextPage endCursor}}}}}`
+
+const externalInputThreadCommentsQuery = `query ExternalInputThreadComments($thread:ID!,$cursor:String!){node(id:$thread){... on PullRequestReviewThread{comments(first:100,after:$cursor){nodes{id body author{login __typename}}pageInfo{hasNextPage endCursor}}}}}`
+
+func mergeExternalInput(_ string, previousIDs []string, current githubExternalInput) (string, []string, string) {
+	bodyHash := sha256.Sum256([]byte(current.Body))
+	bodyDigest := "sha256:" + hex.EncodeToString(bodyHash[:])
+	unique := make(map[string]bool, len(previousIDs)+len(current.MessageIDs))
+	for _, id := range append(previousIDs, current.MessageIDs...) {
+		if id != "" {
+			unique[id] = true
+		}
+	}
+	messageIDs := make([]string, 0, len(unique))
+	for id := range unique {
+		messageIDs = append(messageIDs, id)
+	}
+	sort.Strings(messageIDs)
+	return bodyDigest, messageIDs, externalInputRevision(bodyDigest, messageIDs)
+}
+
+func externalInputRevision(bodyDigest string, messageIDs []string) string {
+	hash := sha256.New()
+	hash.Write([]byte(bodyDigest))
+	hash.Write([]byte{0})
+	for _, id := range messageIDs {
+		hash.Write([]byte(id))
+		hash.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func readGitHubExternalInput(ctx context.Context, pr PullRequest) (githubExternalInput, error) {
+	owner, name, ok := strings.Cut(pr.Repository, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return githubExternalInput{}, fail("github_failed", "invalid GitHub repository %s", pr.Repository)
+	}
+	baseArgs := []string{"-f", "owner=" + owner, "-f", "name=" + name, "-F", fmt.Sprintf("number=%d", pr.Number)}
+	data, err := runGitHubGraphQL(ctx, externalInputInitialQuery, baseArgs...)
+	if err != nil {
+		return githubExternalInput{}, err
+	}
+	var initial struct {
+		Data struct {
+			Viewer     *githubExternalActor `json:"viewer"`
+			Repository *struct {
+				PullRequest *struct {
+					Body          string                          `json:"body"`
+					Comments      githubExternalMessageConnection `json:"comments"`
+					Reviews       githubExternalMessageConnection `json:"reviews"`
+					ReviewThreads githubExternalThreadConnection  `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []githubGraphQLError `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &initial); err != nil {
+		return githubExternalInput{}, fail("github_failed", "decode external input: %v", err)
+	}
+	if err := validateGraphQLResponse(initial.Errors); err != nil {
+		return githubExternalInput{}, err
+	}
+	if initial.Data.Viewer == nil || normalizeGitHubLogin(initial.Data.Viewer.Login) == "" ||
+		initial.Data.Repository == nil || initial.Data.Repository.PullRequest == nil {
+		return githubExternalInput{}, fail("github_failed", "GitHub returned incomplete external input")
+	}
+	viewer := normalizeGitHubLogin(initial.Data.Viewer.Login)
+	pullRequest := initial.Data.Repository.PullRequest
+	input := githubExternalInput{Body: pullRequest.Body}
+	if err := appendExternalMessages(&input.MessageIDs, viewer, pullRequest.Comments.Nodes); err != nil {
+		return githubExternalInput{}, err
+	}
+	if err := appendExternalMessages(&input.MessageIDs, viewer, pullRequest.Reviews.Nodes); err != nil {
+		return githubExternalInput{}, err
+	}
+	if err := appendExternalThreads(ctx, &input.MessageIDs, viewer, pullRequest.ReviewThreads.Nodes); err != nil {
+		return githubExternalInput{}, err
+	}
+	if err := appendExternalMessagePages(ctx, &input.MessageIDs, viewer, externalInputIssueCommentsQuery, "comments",
+		pullRequest.Comments.PageInfo, baseArgs); err != nil {
+		return githubExternalInput{}, err
+	}
+	if err := appendExternalMessagePages(ctx, &input.MessageIDs, viewer, externalInputReviewsQuery, "reviews",
+		pullRequest.Reviews.PageInfo, baseArgs); err != nil {
+		return githubExternalInput{}, err
+	}
+	if err := appendExternalThreadPages(ctx, &input.MessageIDs, viewer, pullRequest.ReviewThreads.PageInfo,
+		baseArgs); err != nil {
+		return githubExternalInput{}, err
+	}
+	sort.Strings(input.MessageIDs)
+	return input, nil
+}
+
+func runGitHubGraphQL(ctx context.Context, query string, variables ...string) ([]byte, error) {
+	args := append([]string{"api", "graphql", "-f", "query=" + query}, variables...)
+	command := exec.CommandContext(ctx, "gh", args...)
+	prepareProcessGroup(command)
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := cleanupProcessGroup(command, command.Run()); err != nil {
+		return nil, fail("github_failed", "read external input: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func validateGraphQLResponse(errors []githubGraphQLError) error {
+	if len(errors) > 0 {
+		return fail("github_failed", "GitHub GraphQL: %s", errors[0].Message)
+	}
+	return nil
+}
+
+func appendExternalMessages(ids *[]string, viewer string, messages []githubExternalMessage) error {
+	for _, message := range messages {
+		if message.Author == nil || message.Author.Typename != "User" ||
+			normalizeGitHubLogin(message.Author.Login) == viewer || strings.TrimSpace(message.Body) == "" {
+			continue
+		}
+		if message.ID == "" {
+			return fail("github_failed", "GitHub returned an external message without an ID")
+		}
+		*ids = append(*ids, message.ID)
+	}
+	return nil
+}
+
+func appendExternalThreads(ctx context.Context, ids *[]string, viewer string, threads []githubExternalThread) error {
+	for _, thread := range threads {
+		if thread.ID == "" {
+			return fail("github_failed", "GitHub returned an external thread without an ID")
+		}
+		if err := appendExternalMessages(ids, viewer, thread.Comments.Nodes); err != nil {
+			return err
+		}
+		page := thread.Comments.PageInfo
+		for page.HasNextPage {
+			if page.EndCursor == "" {
+				return fail("github_failed", "GitHub returned an incomplete external input cursor")
+			}
+			data, err := runGitHubGraphQL(ctx, externalInputThreadCommentsQuery,
+				"-f", "thread="+thread.ID, "-f", "cursor="+page.EndCursor)
+			if err != nil {
+				return err
+			}
+			var response struct {
+				Data struct {
+					Node *struct {
+						Comments githubExternalMessageConnection `json:"comments"`
+					} `json:"node"`
+				} `json:"data"`
+				Errors []githubGraphQLError `json:"errors"`
+			}
+			if err := json.Unmarshal(data, &response); err != nil || response.Data.Node == nil {
+				return fail("github_failed", "decode external thread comments: %v", err)
+			}
+			if err := validateGraphQLResponse(response.Errors); err != nil {
+				return err
+			}
+			if err := appendExternalMessages(ids, viewer, response.Data.Node.Comments.Nodes); err != nil {
+				return err
+			}
+			page = response.Data.Node.Comments.PageInfo
+		}
+	}
+	return nil
+}
+
+func appendExternalMessagePages(ctx context.Context, ids *[]string, viewer, query, field string,
+	page githubExternalPageInfo, baseArgs []string,
+) error {
+	for page.HasNextPage {
+		if page.EndCursor == "" {
+			return fail("github_failed", "GitHub returned an incomplete external input cursor")
+		}
+		data, err := runGitHubGraphQL(ctx, query, append(baseArgs, "-f", "cursor="+page.EndCursor)...)
+		if err != nil {
+			return err
+		}
+		var response struct {
+			Data struct {
+				Repository *struct {
+					PullRequest *struct {
+						Comments githubExternalMessageConnection `json:"comments"`
+						Reviews  githubExternalMessageConnection `json:"reviews"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []githubGraphQLError `json:"errors"`
+		}
+		if err := json.Unmarshal(data, &response); err != nil || response.Data.Repository == nil ||
+			response.Data.Repository.PullRequest == nil {
+			return fail("github_failed", "decode external %s: %v", field, err)
+		}
+		if err := validateGraphQLResponse(response.Errors); err != nil {
+			return err
+		}
+		connection := response.Data.Repository.PullRequest.Comments
+		if field == "reviews" {
+			connection = response.Data.Repository.PullRequest.Reviews
+		}
+		if err := appendExternalMessages(ids, viewer, connection.Nodes); err != nil {
+			return err
+		}
+		page = connection.PageInfo
+	}
+	return nil
+}
+
+func appendExternalThreadPages(ctx context.Context, ids *[]string, viewer string, page githubExternalPageInfo,
+	baseArgs []string,
+) error {
+	for page.HasNextPage {
+		if page.EndCursor == "" {
+			return fail("github_failed", "GitHub returned an incomplete external input cursor")
+		}
+		data, err := runGitHubGraphQL(ctx, externalInputReviewThreadsQuery,
+			append(baseArgs, "-f", "cursor="+page.EndCursor)...)
+		if err != nil {
+			return err
+		}
+		var response struct {
+			Data struct {
+				Repository *struct {
+					PullRequest *struct {
+						ReviewThreads githubExternalThreadConnection `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []githubGraphQLError `json:"errors"`
+		}
+		if err := json.Unmarshal(data, &response); err != nil || response.Data.Repository == nil ||
+			response.Data.Repository.PullRequest == nil {
+			return fail("github_failed", "decode external review threads: %v", err)
+		}
+		if err := validateGraphQLResponse(response.Errors); err != nil {
+			return err
+		}
+		threads := response.Data.Repository.PullRequest.ReviewThreads
+		if err := appendExternalThreads(ctx, ids, viewer, threads.Nodes); err != nil {
+			return err
+		}
+		page = threads.PageInfo
+	}
+	return nil
 }
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}`

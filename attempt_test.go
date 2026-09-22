@@ -7,9 +7,44 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestExternalInputMergeRetainsAndSortsMessageIDs(t *testing.T) {
+	bodyDigest, messageIDs, revision := mergeExternalInput("", []string{"I2"}, githubExternalInput{
+		Body: "body", MessageIDs: []string{"I1", "I2", "I1"},
+	})
+	if bodyDigest != "sha256:230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5" {
+		t.Fatalf("body digest = %q", bodyDigest)
+	}
+	if want := []string{"I1", "I2"}; !reflect.DeepEqual(messageIDs, want) {
+		t.Fatalf("message IDs = %v, want %v", messageIDs, want)
+	}
+	if revision != "sha256:d4b340289f516bafc05136c5dc78026c30f6b522de8d530361932805853c8a1c" {
+		t.Fatalf("revision = %q", revision)
+	}
+}
+
+func TestExternalInputMergeIgnoresDeletedMessagesButTracksBodyChanges(t *testing.T) {
+	const bodyDigest = "sha256:230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5"
+	const revision = "sha256:d4b340289f516bafc05136c5dc78026c30f6b522de8d530361932805853c8a1c"
+
+	gotDigest, gotIDs, gotRevision := mergeExternalInput(bodyDigest, []string{"I1", "I2"}, githubExternalInput{
+		Body: "body", MessageIDs: []string{"I1"},
+	})
+	if gotDigest != bodyDigest || gotRevision != revision || !reflect.DeepEqual(gotIDs, []string{"I1", "I2"}) {
+		t.Fatalf("deleted message changed state: digest=%q ids=%v revision=%q", gotDigest, gotIDs, gotRevision)
+	}
+
+	changedDigest, _, changedRevision := mergeExternalInput(bodyDigest, gotIDs, githubExternalInput{
+		Body: "changed", MessageIDs: []string{"I1"},
+	})
+	if changedDigest == bodyDigest || changedRevision == revision {
+		t.Fatalf("body change was ignored: digest=%q revision=%q", changedDigest, changedRevision)
+	}
+}
 
 func TestEmbeddedAPMFilesMatchCheckedInFiles(t *testing.T) {
 	for name, embedded := range map[string][]byte{
