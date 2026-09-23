@@ -247,7 +247,6 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 			return result
 		}
 		if finalRevision != pr.InputRevision {
-			result.InputRevision = finalRevision
 			setAttemptError(&result, fail("input_changed", "pull request input changed during review"))
 			return result
 		}

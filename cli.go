@@ -578,8 +578,8 @@ func discoverRepositories(ctx context.Context, cfg Config, store *Store) []disco
 						fetched.err = err
 						break
 					}
-					pullRequest.DescriptionDigest, pullRequest.MessageIDs, pullRequest.InputRevision =
-						mergeExternalInput("", nil, input)
+					pullRequest.DescriptionDigest, pullRequest.MessageIDs, pullRequest.ObservedMessageIDs,
+						pullRequest.InputRevision = mergeExternalInputState(nil, nil, input)
 				}
 				eligible = append(eligible, pullRequest)
 			}
