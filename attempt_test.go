@@ -7,9 +7,45 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestExternalInputMergeRetainsAndSortsMessageIDs(t *testing.T) {
+	bodyDigest, messageIDs, revision := mergeExternalInput("", []string{"I2"}, githubExternalInput{
+		Body: "body", MessageIDs: []string{"I1", "I2", "I1"},
+	})
+	if bodyDigest != "sha256:230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5" {
+		t.Fatalf("body digest = %q", bodyDigest)
+	}
+	if want := []string{"I1", "I2"}; !reflect.DeepEqual(messageIDs, want) {
+		t.Fatalf("message IDs = %v, want %v", messageIDs, want)
+	}
+	if revision != "sha256:d4b340289f516bafc05136c5dc78026c30f6b522de8d530361932805853c8a1c" {
+		t.Fatalf("revision = %q", revision)
+	}
+}
+
+func TestExternalInputMergeIgnoresDeletedMessagesButTracksBodyChanges(t *testing.T) {
+	const bodyDigest = "sha256:230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5"
+	const revision = "sha256:d4b340289f516bafc05136c5dc78026c30f6b522de8d530361932805853c8a1c"
+
+	gotDigest, gotIDs, gotRevision := mergeExternalInput(bodyDigest, []string{"I1", "I2"}, githubExternalInput{
+		Body: "body", MessageIDs: []string{"I1"},
+	})
+	if gotDigest != bodyDigest || gotRevision != revision || !reflect.DeepEqual(gotIDs, []string{"I1", "I2"}) {
+		t.Fatalf("deleted message changed state: digest=%q ids=%v revision=%q", gotDigest, gotIDs, gotRevision)
+	}
+
+	changedDigest, _, changedRevision := mergeExternalInput(bodyDigest, gotIDs, githubExternalInput{
+		Body: "changed", MessageIDs: []string{"I1"},
+	})
+	if changedDigest == bodyDigest || changedRevision == revision {
+		t.Fatalf("body change was ignored: digest=%q revision=%q", changedDigest, changedRevision)
+	}
+}
 
 func TestEmbeddedAPMFilesMatchCheckedInFiles(t *testing.T) {
 	for name, embedded := range map[string][]byte{
@@ -60,6 +96,30 @@ func TestTrustedInstructionAuthorizesEscalatedGitHubCLIFallback(t *testing.T) {
 		"Do not use a browser fallback",
 		"Do not ask for another publication confirmation",
 	} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("trusted instruction does not contain %q", required)
+		}
+	}
+}
+
+func TestReviewMarkerIncludesInputRevisionAndPreservesLegacy(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	legacy := "<!-- reviewctl:github:acme/service#7:head:digest -->"
+	if got := reviewMarker(pr, "head", "digest"); got != legacy {
+		t.Fatalf("legacy marker = %q, want %q", got, legacy)
+	}
+	pr.InputRevision = "sha256:input"
+	want := "<!-- reviewctl:github:acme/service#7:head:digest:sha256:input -->"
+	if got := reviewMarker(pr, "head", "digest"); got != want {
+		t.Fatalf("input marker = %q, want %q", got, want)
+	}
+}
+
+func TestTrustedInstructionPinsInputRevision(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	pr.InputRevision = "sha256:input"
+	instruction := trustedInstruction(pr, "head", "digest", "/source", "/receipt", nil)
+	for _, required := range []string{"External input revision: sha256:input", "input_revision"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("trusted instruction does not contain %q", required)
 		}
@@ -510,5 +570,40 @@ func TestHashSkillsSeparatesFileContentsFromTheNextPath(t *testing.T) {
 	secondDigest, _ := HashSkills(second)
 	if firstDigest == secondDigest {
 		t.Fatal("different skill trees produced the same digest")
+	}
+}
+
+func TestValidateReceiptRejectsMismatchedInputRevision(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	pr.InputRevision = "sha256:expected"
+	receipt := Receipt{
+		Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head", SkillDigest: "digest",
+		InputRevision: "sha256:other", Verdict: "APPROVE", ReviewID: "123",
+		ReviewURL: "https://github.com/acme/service/pull/7#pullrequestreview-123",
+	}
+	if err := ValidateReceipt(receipt, pr, "head", "digest", false); err == nil {
+		t.Fatal("accepted a receipt for another external input revision")
+	}
+}
+
+func TestStatusPreservesInputRevision(t *testing.T) {
+	store := openTestStore(t)
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	pr.InputRevision = "sha256:input"
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	attempt := Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest", StartedAt: time.Now(),
+		FinishedAt: time.Now(), ErrorCode: "test", ErrorMessage: "test"}
+	if err := store.Finish(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	queue, history, err := store.Status(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 1 || queue[0].InputRevision != pr.InputRevision || len(history) != 1 ||
+		history[0].InputRevision != pr.InputRevision {
+		t.Fatalf("status lost input revision: queue=%+v history=%+v", queue, history)
 	}
 }

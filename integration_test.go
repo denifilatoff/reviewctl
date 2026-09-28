@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -140,6 +141,37 @@ func TestRawGitHubCommandsCleanNonzeroDescendants(t *testing.T) {
 				t.Fatalf("raw GitHub descendant survived cleanup: before=%q after=%q err=%v", heartbeat, after, err)
 			}
 		})
+	}
+}
+
+func TestReadGitHubExternalInputPagination(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "1")
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+
+	input, err := readGitHubExternalInput(context.Background(), pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"IC1", "IC2", "R1", "R2", "RC1", "RC2", "RP1"}
+	if input.Body != "description" || !reflect.DeepEqual(input.MessageIDs, want) {
+		t.Fatalf("external input = %+v, want body and IDs %v", input, want)
+	}
+}
+
+func TestReadGitHubExternalInputRejectsMissingViewer(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "missing-viewer")
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+
+	if _, err := readGitHubExternalInput(context.Background(), pr); err == nil {
+		t.Fatal("accepted external input without an authenticated viewer")
 	}
 }
 
@@ -1139,6 +1171,77 @@ repositories:
 	}
 }
 
+func TestFullProcessQueuesPRContentEvents(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoveryDir := filepath.Join(temp, "discovery")
+	if err := os.Mkdir(discoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DISCOVERY_DIR", discoveryDir)
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "file")
+	externalPath := filepath.Join(temp, "external-input.json")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_FILE", externalPath)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	writeDiscoverySnapshots(t, discoveryDir, repository.Repository, []fakeDiscoveryPR{{
+		URL: "https://github.com/acme/service/pull/7", Number: 7, State: "OPEN", HeadRefOID: "a",
+		Author: fakeDiscoveryAuthor{Login: "dependabot[bot]"},
+	}})
+	store := openTestStore(t)
+	cfg := Config{TrustedAuthors: []string{"dependabot[bot]"}, Repositories: []Repository{repository}}
+	input := fakeExternalInput{Body: "initial"}
+	writeExternalInput(t, externalPath, input)
+	if result := discoverRepositories(context.Background(), cfg, store); result[0].Enqueued != 0 {
+		t.Fatalf("initial discovery = %+v", result)
+	}
+
+	assertEvent := func(name string, want bool) {
+		t.Helper()
+		writeExternalInput(t, externalPath, input)
+		result := discoverRepositories(context.Background(), cfg, store)
+		wantCount := 0
+		if want {
+			wantCount = 1
+		}
+		if result[0].Status != "success" || result[0].Enqueued != wantCount {
+			t.Fatalf("%s discovery = %+v, want enqueued=%d", name, result, wantCount)
+		}
+		queue, err := store.Snapshot(context.Background())
+		if err != nil || len(queue) != wantCount {
+			t.Fatalf("%s queue = %+v, err=%v", name, queue, err)
+		}
+		if want {
+			now := time.Now()
+			if err := store.Finish(context.Background(), Attempt{
+				PullRequest: queue[0], HeadSHA: "a", SkillDigest: "test", StartedAt: now, FinishedAt: now,
+				Success: true, Verdict: "APPROVE", ReviewID: name, ReviewURL: "https://example.test/" + name,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	input.Body = "changed"
+	assertEvent("description", true)
+	input.Comments = append(input.Comments, fakeExternalMessage{ID: "G1", Body: "general", Login: "alice", Type: "User"})
+	assertEvent("general", true)
+	input.Reviews = append(input.Reviews, fakeExternalMessage{ID: "R1", Body: "review", Login: "bob", Type: "User"})
+	assertEvent("review", true)
+	input.Threads = append(input.Threads, fakeExternalThread{ID: "T1", Comments: []fakeExternalMessage{
+		{ID: "I1", Body: "inline", Login: "carol", Type: "User"},
+	}})
+	assertEvent("inline", true)
+	input.Threads[0].Comments = append(input.Threads[0].Comments,
+		fakeExternalMessage{ID: "P1", Body: "reply", Login: "dave", Type: "User"})
+	assertEvent("reply", true)
+	input.Comments = append(input.Comments,
+		fakeExternalMessage{ID: "B1", Body: "bot", Login: "robot", Type: "Bot"},
+		fakeExternalMessage{ID: "S1", Body: "self", Login: "reviewer", Type: "User"})
+	assertEvent("excluded-authors", false)
+}
+
 func TestGitHubDiscoverySentinelPreservesBaseline(t *testing.T) {
 	temp := t.TempDir()
 	fakeBin := installProcessHelpers(t, temp)
@@ -1222,6 +1325,25 @@ type fakeDiscoveryAuthor struct {
 	Login string `json:"login"`
 }
 
+type fakeExternalMessage struct {
+	ID    string `json:"id"`
+	Body  string `json:"body"`
+	Login string `json:"login"`
+	Type  string `json:"type"`
+}
+
+type fakeExternalThread struct {
+	ID       string                `json:"id"`
+	Comments []fakeExternalMessage `json:"comments"`
+}
+
+type fakeExternalInput struct {
+	Body     string                `json:"body"`
+	Comments []fakeExternalMessage `json:"comments"`
+	Reviews  []fakeExternalMessage `json:"reviews"`
+	Threads  []fakeExternalThread  `json:"threads"`
+}
+
 func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fakeDiscoveryPR) {
 	t.Helper()
 	data, err := json.Marshal(snapshot)
@@ -1229,6 +1351,17 @@ func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fa
 		t.Fatal(err)
 	}
 	writeDiscoveryFixture(t, dir, repository, string(data))
+}
+
+func writeExternalInput(t *testing.T, path string, input fakeExternalInput) {
+	t.Helper()
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
@@ -1337,6 +1470,50 @@ func TestProcessAttemptRejectsRecoveryStateThatDisagreesWithGitHub(t *testing.T)
 	result := ProcessAttempt(context.Background(), cfg, store, pr)
 	if result.Success || result.ErrorCode != "receipt_invalid" {
 		t.Fatalf("mismatched recovery result: %+v", result)
+	}
+}
+
+func TestProcessAttemptRetainsQueueWhenExternalInputChanges(t *testing.T) {
+	temp := t.TempDir()
+	fakeBin := installProcessHelpers(t, temp)
+	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
+	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
+	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT", "race")
+	t.Setenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_COUNTER", filepath.Join(temp, "input-counter"))
+
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	digest, ids, revision := mergeExternalInput("", nil,
+		githubExternalInput{Body: "description", MessageIDs: []string{"A"}})
+	pr.InputRevision = revision
+	store := openTestStore(t)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	snapshot := pullRequestSnapshot{PullRequest: pr, HeadSHA: "0123456789abcdef0123456789abcdef01234567",
+		DescriptionDigest: digest, MessageIDs: ids}
+	if _, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueMany(context.Background(), []PullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
+		Repositories: []Repository{repository},
+	}
+	result := ProcessAttempt(context.Background(), cfg, store, pr)
+	if result.Success || result.ErrorCode != "input_changed" {
+		t.Fatalf("input race result = %+v", result)
+	}
+	if err := store.Finish(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := store.Snapshot(context.Background())
+	want := externalInputRevision(digest, []string{"A", "B"})
+	if err != nil || len(queue) != 1 || queue[0].InputRevision != want {
+		t.Fatalf("input race queue = %+v, err=%v, want revision=%q", queue, err, want)
 	}
 }
 
@@ -1603,6 +1780,14 @@ func helperGit(args []string) {
 
 func helperGH(args []string) {
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		if strings.Contains(strings.Join(args, " "), "ExternalInput") {
+			mode := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT")
+			if mode == "" {
+				mode = "empty"
+			}
+			helperGitHubExternalInput(args, mode)
+			return
+		}
 		nodes := []any{}
 		if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
 			resolved := false
@@ -1816,6 +2001,108 @@ func helperGH(args []string) {
 	os.Exit(92)
 }
 
+func helperGitHubExternalInput(args []string, mode string) {
+	joined := strings.Join(args, " ")
+	message := func(id, login, actor, body string) map[string]any {
+		return map[string]any{
+			"id": id, "body": body, "author": map[string]string{"login": login, "__typename": actor},
+		}
+	}
+	page := func(nodes []any, next bool, cursor string) map[string]any {
+		return map[string]any{
+			"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": next, "endCursor": cursor},
+		}
+	}
+	data := map[string]any{}
+	switch {
+	case strings.Contains(joined, "ExternalInputInitial"):
+		viewer := any(map[string]string{"login": "reviewer"})
+		body := "description"
+		if mode == "missing-viewer" {
+			viewer = nil
+		}
+		comments := page(nil, false, "")
+		reviews := page(nil, false, "")
+		threads := page(nil, false, "")
+		if mode == "file" {
+			content, err := os.ReadFile(os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_FILE"))
+			var input fakeExternalInput
+			if err != nil || json.Unmarshal(content, &input) != nil {
+				os.Exit(93)
+			}
+			body = input.Body
+			messageNodes := func(input []fakeExternalMessage) []any {
+				nodes := make([]any, 0, len(input))
+				for _, item := range input {
+					nodes = append(nodes, message(item.ID, item.Login, item.Type, item.Body))
+				}
+				return nodes
+			}
+			comments = page(messageNodes(input.Comments), false, "")
+			reviews = page(messageNodes(input.Reviews), false, "")
+			threadNodes := make([]any, 0, len(input.Threads))
+			for _, thread := range input.Threads {
+				threadNodes = append(threadNodes, map[string]any{
+					"id": thread.ID, "comments": page(messageNodes(thread.Comments), false, ""),
+				})
+			}
+			threads = page(threadNodes, false, "")
+		} else if mode == "race" {
+			counterPath := os.Getenv("REVIEWCTL_FAKE_EXTERNAL_INPUT_COUNTER")
+			count := 0
+			if value, err := os.ReadFile(counterPath); err == nil {
+				count, _ = strconv.Atoi(string(value))
+			}
+			if os.WriteFile(counterPath, []byte(strconv.Itoa(count+1)), 0o600) != nil {
+				os.Exit(93)
+			}
+			nodes := []any{message("A", "alice", "User", "first")}
+			if count > 0 {
+				nodes = append(nodes, message("B", "bob", "User", "second"))
+			}
+			comments = page(nodes, false, "")
+		} else if mode != "empty" && mode != "missing-viewer" {
+			comments = page([]any{
+				message("IC1", "alice", "User", "general"),
+				message("BOT", "robot", "Bot", "automated"),
+				message("SELF", "reviewer", "User", "own"),
+				message("EMPTY", "alice", "User", "   "),
+			}, true, "C1")
+			reviews = page([]any{message("R1", "bob", "User", "review")}, true, "RV1")
+			threads = page([]any{map[string]any{
+				"id": "T1", "comments": page([]any{message("RC1", "carol", "User", "inline")}, true, "TC1"),
+			}}, true, "TH1")
+		}
+		data = map[string]any{
+			"viewer": viewer,
+			"repository": map[string]any{"pullRequest": map[string]any{
+				"body": body, "comments": comments, "reviews": reviews, "reviewThreads": threads,
+			}},
+		}
+	case strings.Contains(joined, "ExternalInputIssueComments"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"comments": page([]any{message("IC2", "alice", "User", "next general")}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputReviews"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"reviews": page([]any{message("R2", "bob", "User", "next review")}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputReviewThreads"):
+		data = map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
+			"reviewThreads": page([]any{map[string]any{
+				"id": "T2", "comments": page([]any{message("RC2", "dave", "User", "next inline")}, false, ""),
+			}}, false, ""),
+		}}}
+	case strings.Contains(joined, "ExternalInputThreadComments"):
+		data = map[string]any{"node": map[string]any{
+			"comments": page([]any{message("RP1", "erin", "User", "reply")}, false, ""),
+		}}
+	default:
+		os.Exit(93)
+	}
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"data": data})
+}
+
 func appendDoctorCall(path, call string) {
 	if path == "" {
 		return
@@ -1978,7 +2265,8 @@ func helperCodex(args []string) {
 	}
 	receipt := Receipt{
 		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
-		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
+		InputRevision: fields["External input revision"], SkillDigest: fields["Skill digest"], Verdict: verdict,
+		ReviewID:  "123",
 		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
 		Recovered: recovered, DiscussionOutcomes: []DiscussionOutcome{},
 	}

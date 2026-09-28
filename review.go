@@ -8,10 +8,11 @@ import (
 )
 
 type PullRequest struct {
-	Provider   string `json:"provider"`
-	Repository string `json:"repository"`
-	Number     int64  `json:"number"`
-	URL        string `json:"url"`
+	Provider      string `json:"provider"`
+	Repository    string `json:"repository"`
+	Number        int64  `json:"number"`
+	URL           string `json:"url"`
+	InputRevision string `json:"input_revision,omitempty"`
 }
 
 func ParsePullRequestURL(raw string) (PullRequest, error) {

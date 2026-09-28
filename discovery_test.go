@@ -11,6 +11,8 @@ import (
 func TestShouldEnqueueDiscoveryEventMatrix(t *testing.T) {
 	readyA := pullRequestSnapshot{HeadSHA: "a"}
 	readyB := pullRequestSnapshot{HeadSHA: "b"}
+	readyInputA := pullRequestSnapshot{PullRequest: PullRequest{InputRevision: "input-a"}, HeadSHA: "a"}
+	readyInputB := pullRequestSnapshot{PullRequest: PullRequest{InputRevision: "input-b"}, HeadSHA: "a"}
 	draftA := pullRequestSnapshot{HeadSHA: "a", IsDraft: true}
 	draftB := pullRequestSnapshot{HeadSHA: "b", IsDraft: true}
 
@@ -27,6 +29,9 @@ func TestShouldEnqueueDiscoveryEventMatrix(t *testing.T) {
 		{name: "new draft pull request", initialized: true, current: draftA},
 		{name: "draft becomes ready", initialized: true, previous: &draftA, current: readyA, want: true},
 		{name: "ready head changes", initialized: true, previous: &readyA, current: readyB, want: true},
+		{name: "ready input changes", initialized: true, previous: &readyInputA, current: readyInputB, want: true},
+		{name: "legacy input is seeded", initialized: true, previous: &readyA, current: readyInputA},
+		{name: "ready input is unchanged", initialized: true, previous: &readyInputA, current: readyInputA},
 		{name: "draft head changes", initialized: true, previous: &draftA, current: draftB},
 		{name: "ready becomes draft", initialized: true, previous: &readyA, current: draftA},
 		{name: "ready is unchanged", initialized: true, previous: &readyA, current: readyA},
@@ -37,6 +42,96 @@ func TestShouldEnqueueDiscoveryEventMatrix(t *testing.T) {
 				t.Fatalf("shouldEnqueueDiscovery() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestDiscoveryInputChangesCoalesceToLatestRevision(t *testing.T) {
+	store := openTestStore(t)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	first := discoverySnapshot(repository.Repository, 1, "a", false)
+	first.DescriptionDigest, first.MessageIDs = "body-a", []string{"I1"}
+	first.InputRevision = externalInputRevision(first.DescriptionDigest, first.MessageIDs)
+	if enqueued, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{first}); err != nil || enqueued != 0 {
+		t.Fatalf("first snapshot: enqueued=%d err=%v", enqueued, err)
+	}
+
+	second := first
+	second.MessageIDs = []string{"I1", "I2"}
+	second.InputRevision = externalInputRevision(second.DescriptionDigest, second.MessageIDs)
+	if enqueued, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{second}); err != nil || enqueued != 1 {
+		t.Fatalf("second snapshot: enqueued=%d err=%v", enqueued, err)
+	}
+
+	third := second
+	third.DescriptionDigest = "body-b"
+	third.InputRevision = externalInputRevision(third.DescriptionDigest, third.MessageIDs)
+	if enqueued, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{third}); err != nil || enqueued != 0 {
+		t.Fatalf("third snapshot: enqueued=%d err=%v", enqueued, err)
+	}
+	queue, err := store.Snapshot(context.Background())
+	if err != nil || len(queue) != 1 || queue[0].InputRevision != third.InputRevision {
+		t.Fatalf("coalesced queue = %+v, err=%v", queue, err)
+	}
+}
+
+func TestDiscoveryInputMigrationSeedsExistingPullRequest(t *testing.T) {
+	store := openTestStore(t)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	legacy := discoverySnapshot(repository.Repository, 1, "a", false)
+	if _, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{legacy}); err != nil {
+		t.Fatal(err)
+	}
+	seeded := legacy
+	seeded.DescriptionDigest, seeded.MessageIDs = "body-a", []string{"I1"}
+	seeded.InputRevision = externalInputRevision(seeded.DescriptionDigest, seeded.MessageIDs)
+	if enqueued, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{seeded}); err != nil || enqueued != 0 {
+		t.Fatalf("migration seed: enqueued=%d err=%v", enqueued, err)
+	}
+}
+
+func TestStoreMergeQueuedInputUpdatesBaselineAndQueue(t *testing.T) {
+	store := openTestStore(t)
+	repository := Repository{Provider: "github", Repository: "acme/service"}
+	first := discoverySnapshot(repository.Repository, 1, "a", false)
+	first.DescriptionDigest, first.MessageIDs, first.InputRevision = mergeExternalInput("", nil,
+		githubExternalInput{Body: "body", MessageIDs: []string{"I1"}})
+	if _, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{first}); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.DescriptionDigest, second.MessageIDs, second.InputRevision = mergeExternalInput("", nil,
+		githubExternalInput{Body: "body", MessageIDs: []string{"I1", "I2"}})
+	if _, err := store.ApplyDiscoverySnapshot(context.Background(), repository,
+		[]pullRequestSnapshot{second}); err != nil {
+		t.Fatal(err)
+	}
+
+	revision, err := store.MergeQueuedInput(context.Background(), second.PullRequest,
+		githubExternalInput{Body: "body", MessageIDs: []string{"I3"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := externalInputRevision(second.DescriptionDigest, []string{"I1", "I2", "I3"})
+	if revision != want {
+		t.Fatalf("merged revision = %q, want %q", revision, want)
+	}
+	var baseline, queued string
+	if err := store.db.QueryRow(`SELECT input_revision FROM pull_request_baselines
+		WHERE provider = 'github' AND repository = 'acme/service' AND change_number = 1`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT input_revision FROM queue
+		WHERE provider = 'github' AND repository = 'acme/service' AND change_number = 1`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if baseline != want || queued != want {
+		t.Fatalf("stored revisions: baseline=%q queue=%q want=%q", baseline, queued, want)
 	}
 }
 

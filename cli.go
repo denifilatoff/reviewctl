@@ -569,11 +569,23 @@ func discoverRepositories(ctx context.Context, cfg Config, store *Store) []disco
 			item.Observed = len(fetched.snapshot)
 			eligible := fetched.snapshot[:0]
 			for _, pullRequest := range fetched.snapshot {
-				if isTrustedGitHubAuthor(cfg, pullRequest.Author) {
-					eligible = append(eligible, pullRequest)
+				if !isTrustedGitHubAuthor(cfg, pullRequest.Author) {
+					continue
 				}
+				if !pullRequest.IsDraft {
+					input, err := readGitHubExternalInput(ctx, pullRequest.PullRequest)
+					if err != nil {
+						fetched.err = err
+						break
+					}
+					pullRequest.DescriptionDigest, pullRequest.MessageIDs, pullRequest.ObservedMessageIDs,
+						pullRequest.InputRevision = mergeExternalInputState(nil, nil, input)
+				}
+				eligible = append(eligible, pullRequest)
 			}
-			item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, eligible)
+			if fetched.err == nil {
+				item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, eligible)
+			}
 		}
 		if fetched.err != nil {
 			item.Status = "failed"

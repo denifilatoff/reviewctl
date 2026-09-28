@@ -30,6 +30,7 @@ type Receipt struct {
 	Repository         string              `json:"repository"`
 	Number             int64               `json:"number"`
 	HeadSHA            string              `json:"head_sha"`
+	InputRevision      string              `json:"input_revision,omitempty"`
 	SkillDigest        string              `json:"skill_digest"`
 	Verdict            string              `json:"verdict"`
 	ReviewID           json.Number         `json:"review_id"`
@@ -51,7 +52,8 @@ func codexExecArgs(workspace, receiptPath string) []string {
 
 func ValidateReceipt(receipt Receipt, expected PullRequest, head, digest string, selfAuthored bool) error {
 	if receipt.Provider != expected.Provider || strings.ToLower(receipt.Repository) != expected.Repository ||
-		receipt.Number != expected.Number || receipt.HeadSHA != head || receipt.SkillDigest != digest {
+		receipt.Number != expected.Number || receipt.HeadSHA != head || receipt.InputRevision != expected.InputRevision ||
+		receipt.SkillDigest != digest {
 		return fmt.Errorf("receipt scope does not match the pinned attempt")
 	}
 	if receipt.Verdict != "APPROVE" && receipt.Verdict != "REQUEST_CHANGES" && receipt.Verdict != "COMMENT" {
@@ -119,6 +121,19 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	if err := ValidateGitHubPullRequest(cfg, pr, resolved); err != nil {
 		setAttemptError(&result, err)
 		return result
+	}
+	if pr.InputRevision != "" {
+		input, err := readGitHubExternalInput(ctx, pr)
+		if err != nil {
+			setAttemptError(&result, err)
+			return result
+		}
+		pr.InputRevision, err = store.MergeQueuedInput(ctx, pr, input)
+		if err != nil {
+			setAttemptError(&result, fail("state_failed", "%v", err))
+			return result
+		}
+		result.PullRequest = pr
 	}
 	authenticatedLogin, err := resolveGitHubLogin(ctx)
 	if err != nil {
@@ -202,11 +217,11 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 		setAttemptError(&result, fail("receipt_invalid", "%v", err))
 		return result
 	}
-	result.Success = true
 	result.Verdict = receipt.Verdict
 	result.ReviewID = string(receipt.ReviewID)
 	result.ReviewURL = receipt.ReviewURL
 	result.Recovered = receipt.Recovered
+	result.Success = true
 	if err := store.queueSignature(result); err != nil {
 		setAttemptError(&result, fail("state_failed", "%v", err))
 		return result
@@ -218,6 +233,23 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	}
 	if final.HeadSHA != resolved.HeadSHA {
 		setAttemptError(&result, fail("head_changed", "pull request head changed during review"))
+		return result
+	}
+	if pr.InputRevision != "" {
+		input, err := readGitHubExternalInput(ctx, pr)
+		if err != nil {
+			setAttemptError(&result, err)
+			return result
+		}
+		finalRevision, err := store.MergeQueuedInput(ctx, pr, input)
+		if err != nil {
+			setAttemptError(&result, fail("state_failed", "%v", err))
+			return result
+		}
+		if finalRevision != pr.InputRevision {
+			setAttemptError(&result, fail("input_changed", "pull request input changed during review"))
+			return result
+		}
 	}
 	return result
 }
@@ -345,6 +377,7 @@ Repository: %s
 Pull request: %d
 Pull request URL: %s
 Expected head: %s
+External input revision: %s
 Skill digest: %s
 Source checkout: %s
 Publish: true
@@ -367,15 +400,20 @@ If GitHub forbids a decisive review because the authenticated reviewer authored 
 instead. Include the marker and read the review back. Set verdict to the actual submitted or recovered GitHub review
 event. Map a GitHub COMMENTED event to COMMENT even if the review body recommends changes. Do not change source code or
 unrelated GitHub state. Write only one JSON object as the final response with provider, repository, number, head_sha,
-skill_digest, verdict, review_id, review_url, recovered, and discussion_outcomes fields. The Codex CLI writes that final
-response to the receipt path.
+input_revision, skill_digest, verdict, review_id, review_url, recovered, and discussion_outcomes fields. The Codex CLI
+writes that final response to the receipt path.
 Before your final response, wait for every native subagent and nested descendant to finish.
 Do not launch separate Codex processes: use native subagents so request usage can be accounted for.
 Do not add a model or cost signature. The controller appends it after all model requests finish.
-`, pr.Provider, pr.Repository, pr.Number, pr.URL, head, digest, source, marker, receipt, ownedDiscussions)
+`, pr.Provider, pr.Repository, pr.Number, pr.URL, head, pr.InputRevision, digest, source, marker, receipt,
+		ownedDiscussions)
 }
 
 func reviewMarker(pr PullRequest, head, digest string) string {
+	if pr.InputRevision != "" {
+		return fmt.Sprintf("<!-- reviewctl:%s:%s#%d:%s:%s:%s -->", pr.Provider, pr.Repository, pr.Number, head,
+			digest, pr.InputRevision)
+	}
 	return fmt.Sprintf("<!-- reviewctl:%s:%s#%d:%s:%s -->", pr.Provider, pr.Repository, pr.Number, head, digest)
 }
 
