@@ -639,12 +639,13 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantJobPath := fakeBin + ":/usr/bin:/bin:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
 	wantFragments := []string{
 		"<string>" + filepath.Join(fakeBin, "reviewctl") + "</string>",
 		"<string>--json</string>",
 		"<string>run</string>",
 		"<integer>600</integer>",
-		"<string>" + fakeBin + ":/usr/bin:/bin</string>",
+		"<string>" + wantJobPath + "</string>",
 		"<string>" + filepath.Join(home, ".config") + "</string>",
 		"<string>" + filepath.Join(home, ".local", "state") + "</string>",
 		"<string>" + filepath.Join(home, ".cache") + "</string>",
@@ -667,7 +668,7 @@ esac
 	}
 	for _, entry := range []string{
 		"HOME=" + home,
-		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"PATH=" + wantJobPath,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
 		"XDG_STATE_HOME=" + filepath.Join(home, ".local", "state"),
 		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
