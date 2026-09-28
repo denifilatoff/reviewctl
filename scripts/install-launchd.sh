@@ -41,6 +41,7 @@ for executable in "$reviewctl" "$gh" "$codex" "$apm" "$ccusage"; do
 	*) job_path=$directory:$job_path ;;
 	esac
 done
+job_path=$job_path:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS
 
 config_home=${XDG_CONFIG_HOME:-$home/.config}
 state_home=${XDG_STATE_HOME:-$home/.local/state}
