@@ -128,14 +128,14 @@ func TestCostSignatureAndDurableAccounting(t *testing.T) {
 	if got := unavailable.signature(); got != "Model: gpt-test high (cost unavailable)" {
 		t.Fatal(got)
 	}
-	body, err := reviewSignatureBody("Findings\n\n<!-- original marker -->", cost.signature())
+	body, err := reviewSignatureBody("Findings\n\n<!-- original marker -->", cost.githubSignature(), cost.signature())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again, err := reviewSignatureBody(body, cost.signature()); err != nil || again != body {
+	if again, err := reviewSignatureBody(body, cost.githubSignature(), cost.signature()); err != nil || again != body {
 		t.Fatalf("non-idempotent signature: %q %v", again, err)
 	}
-	if _, err := reviewSignatureBody(signatureEnd+signatureStart, cost.signature()); err == nil {
+	if _, err := reviewSignatureBody(signatureEnd+signatureStart, cost.githubSignature(), cost.signature()); err == nil {
 		t.Fatal("accepted malformed markers")
 	}
 	store := openTestStore(t)
@@ -206,4 +206,28 @@ func TestLiveCCUsage(t *testing.T) {
 	}
 	data, _ := json.Marshal(cost)
 	t.Log(string(data))
+}
+
+func TestGitHubSignatureOmitsUnavailableFields(t *testing.T) {
+	price := 0.00000418
+	for _, tc := range []struct {
+		name string
+		cost ReviewCost
+		want string
+	}{
+		{"model and effort only", ReviewCost{Model: "gpt-test", Effort: "high"}, "<sub>🤖 gpt-test high</sub>"},
+		{"requested model is unknown", ReviewCost{RequestedModel: "gpt-test", USD: &price}, ""},
+		{"invalid model", ReviewCost{Model: "<tag>"}, ""},
+		{"legacy cost", ReviewCost{Model: "gpt-test", USD: &price}, "<sub>🤖 gpt-test usd=0.0000042</sub>"},
+		{"zero versus missing", ReviewCost{Model: "gpt-test", USD: &price, Report: json.RawMessage(`{"sessions":[
+			{"inputTokens":980,"cacheCreationTokens":20,"cacheReadTokens":0,"outputTokens":200},
+			{"inputTokens":12,"cacheReadTokens":0}
+		]}`)}, "<sub>🤖 gpt-test in=1.012k cached=0 usd=0.0000042</sub>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cost.githubSignature(); got != tc.want {
+				t.Fatalf("signature = %q; want %q", got, tc.want)
+			}
+		})
+	}
 }

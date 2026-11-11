@@ -14,16 +14,24 @@ import (
 const signatureStart = "<!-- reviewctl:model-cost -->"
 const signatureEnd = "<!-- /reviewctl:model-cost -->"
 
-func reviewSignatureBody(body, signature string) (string, error) {
+func reviewSignatureBody(body, signature, legacy string) (string, error) {
 	start, end := strings.Index(body, signatureStart), strings.Index(body, signatureEnd)
-	block := signatureStart + "\n" + signature + "\n" + signatureEnd
-	if start < 0 && end < 0 {
-		return strings.TrimRight(body, "\n") + "\n\n" + block, nil
+	if start >= 0 || end >= 0 {
+		invalid := fmt.Errorf("review contains an invalid cost signature block")
+		if start < 0 || strings.Count(body, signatureStart) != 1 || strings.Count(body, signatureEnd) > 1 {
+			return "", invalid
+		}
+		managed := "\n\n" + signature
+		if end >= 0 {
+			managed = "\n" + legacy + "\n" + signatureEnd
+		}
+		suffix, ok := strings.CutPrefix(body[start+len(signatureStart):], managed)
+		if !ok || suffix != "" && !strings.HasPrefix(suffix, "\n") && !strings.HasPrefix(suffix, "\r\n") {
+			return "", invalid
+		}
+		body = body[:start] + suffix
 	}
-	if start < 0 || end < start || strings.Count(body, signatureStart) != 1 || strings.Count(body, signatureEnd) != 1 {
-		return "", fmt.Errorf("review contains an invalid cost signature block")
-	}
-	return body[:start] + block + body[end+len(signatureEnd):], nil
+	return strings.TrimRight(body, "\r\n") + "\n\n" + signatureStart + "\n\n" + signature, nil
 }
 
 func githubJSON(ctx context.Context, args []string, input any, output any) error {
@@ -86,6 +94,10 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 	if attempt.Cost == nil || !attempt.Success || attempt.Recovered {
 		return fmt.Errorf("attempt has no original review accounting")
 	}
+	signature := attempt.Cost.githubSignature()
+	if signature == "" {
+		return nil
+	}
 	pr, err := resolveGitHub(ctx, attempt.PullRequest)
 	if err != nil {
 		return err
@@ -111,7 +123,7 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 		normalizeGitHubLogin(review.User.Login) != login || !strings.Contains(review.Body, marker) {
 		return fmt.Errorf("submitted review does not match the recorded attempt and authenticated reviewer")
 	}
-	body, err := reviewSignatureBody(review.Body, attempt.Cost.signature())
+	body, err := reviewSignatureBody(review.Body, signature, attempt.Cost.signature())
 	if err != nil {
 		return err
 	}

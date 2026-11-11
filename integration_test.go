@@ -925,6 +925,7 @@ func TestFullProcessReviewAndRunCycle(t *testing.T) {
 	}
 
 	fakeBin := installProcessHelpers(t, temp)
+	codexHome := filepath.Join(temp, "codex")
 
 	configHome := filepath.Join(temp, "config")
 	stateHome := filepath.Join(temp, "state")
@@ -943,6 +944,7 @@ repositories:
 	}
 	env := append(os.Environ(),
 		"GO_WANT_REVIEWCTL_HELPER=1",
+		"CODEX_HOME="+codexHome,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"XDG_CONFIG_HOME="+configHome,
 		"XDG_STATE_HOME="+stateHome,
@@ -974,8 +976,11 @@ repositories:
 	if !strings.Contains(result.stdout, `"recovered":false`) {
 		t.Fatalf("first run did not report publication: %+v", result)
 	}
-	if _, err := os.Stat(filepath.Join(temp, "published")); err != nil {
-		t.Fatalf("Codex double did not publish: %v", err)
+	reviewPath := filepath.Join(temp, "published.review.json")
+	reviewData, err := os.ReadFile(reviewPath)
+	var review submittedReview
+	if err != nil || json.Unmarshal(reviewData, &review) != nil || strings.Contains(review.Body, signatureStart) {
+		t.Fatalf("review with unknown model: %s %v", reviewData, err)
 	}
 
 	result = runCLI(t, env, binary, "--json", "review", firstURL)
@@ -1014,7 +1019,20 @@ repositories:
 	if err := os.Remove(filepath.Join(temp, "published")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(temp, "published.review.json")); err != nil {
+	if err := os.Remove(reviewPath); err != nil {
+		t.Fatal(err)
+	}
+	sessions := filepath.Join(codexHome, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log := `{"type":"session_meta","payload":{"id":"fake-root"}}
+{"type":"turn_context","payload":{"model":"gpt-test","effort":"high"}}
+`
+	if err := os.WriteFile(filepath.Join(sessions, "fake-root.jsonl"), []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "ccusage"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	headChangeEnv := append(append([]string{}, env...),
@@ -1028,9 +1046,9 @@ repositories:
 		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
 		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
 	}
-	reviewData, err := os.ReadFile(filepath.Join(temp, "published.review.json"))
-	var review submittedReview
-	if err != nil || json.Unmarshal(reviewData, &review) != nil || !strings.Contains(review.Body, signatureStart) {
+	reviewData, err = os.ReadFile(reviewPath)
+	if err != nil || json.Unmarshal(reviewData, &review) != nil ||
+		!strings.HasSuffix(review.Body, "\n\n<sub>🤖 gpt-test high</sub>") {
 		t.Fatalf("moving-head review lost accounting signature: %s %v", reviewData, err)
 	}
 }
