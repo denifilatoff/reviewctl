@@ -128,14 +128,14 @@ func TestCostSignatureAndDurableAccounting(t *testing.T) {
 	if got := unavailable.signature(); got != "Model: gpt-test high (cost unavailable)" {
 		t.Fatal(got)
 	}
-	body, err := reviewSignatureBody("Findings\n\n<!-- original marker -->", cost.githubSignature(), cost.signature())
+	body, err := reviewSignatureBody("Findings\n\n<!-- original marker -->", cost.githubSignature(roundedTokenCount), cost.signature())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again, err := reviewSignatureBody(body, cost.githubSignature(), cost.signature()); err != nil || again != body {
+	if again, err := reviewSignatureBody(body, cost.githubSignature(roundedTokenCount), cost.signature()); err != nil || again != body {
 		t.Fatalf("non-idempotent signature: %q %v", again, err)
 	}
-	if _, err := reviewSignatureBody(signatureEnd+signatureStart, cost.githubSignature(), cost.signature()); err == nil {
+	if _, err := reviewSignatureBody(signatureEnd+signatureStart, cost.githubSignature(roundedTokenCount), cost.signature()); err == nil {
 		t.Fatal("accepted malformed markers")
 	}
 	store := openTestStore(t)
@@ -222,10 +222,13 @@ func TestGitHubSignatureOmitsUnavailableFields(t *testing.T) {
 		{"zero versus missing", ReviewCost{Model: "gpt-test", USD: &price, Report: json.RawMessage(`{"sessions":[
 			{"inputTokens":980,"cacheCreationTokens":20,"cacheReadTokens":0,"outputTokens":200},
 			{"inputTokens":12,"cacheReadTokens":0}
-		]}`)}, "<sub>🤖 gpt-test in=1.012k cached=0 usd=0.0000042</sub>"},
+		]}`)}, "<sub>🤖 gpt-test in=1k cached=0k usd=0.0000042</sub>"},
+		{"round to nearest thousand", ReviewCost{Model: "gpt-test", USD: &price, Report: json.RawMessage(`{"sessions":[
+			{"inputTokens":499,"cacheReadTokens":500,"outputTokens":1999}
+		]}`)}, "<sub>🤖 gpt-test in=0k cached=1k out=2k usd=0.0000042</sub>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cost.githubSignature(); got != tc.want {
+			if got := tc.cost.githubSignature(roundedTokenCount); got != tc.want {
 				t.Fatalf("signature = %q; want %q", got, tc.want)
 			}
 		})

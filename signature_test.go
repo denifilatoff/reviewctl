@@ -52,8 +52,9 @@ func TestSignatureDeliveryRetryAndOwnership(t *testing.T) {
 		t.Fatal(errors)
 	}
 	data, err := os.ReadFile(path)
+	const roundedFooter = "<sub>🤖 gpt-test low in=13k cached=40k out=3k usd=0.11</sub>"
 	if err != nil || json.Unmarshal(data, &review) != nil ||
-		!strings.HasSuffix(review.Body, "\n\n<sub>🤖 gpt-test low in=12.5k cached=40k out=3k usd=0.11</sub>") || strings.Count(review.Body, signatureStart) != 1 {
+		!strings.HasSuffix(review.Body, "\n\n"+roundedFooter) || strings.Count(review.Body, signatureStart) != 1 {
 		t.Fatalf("signature readback: %s %v", data, err)
 	}
 	if err := publishSignature(ctx, cfg, attempt); err != nil {
@@ -62,6 +63,18 @@ func TestSignatureDeliveryRetryAndOwnership(t *testing.T) {
 	again, _ := os.ReadFile(path)
 	if string(again) != string(data) {
 		t.Fatal("duplicate delivery changed review")
+	}
+	const previousFooter = "<sub>🤖 gpt-test low in=12.5k cached=40k out=3k usd=0.11</sub>"
+	review.Body = strings.TrimSuffix(review.Body, roundedFooter) + previousFooter
+	previous, _ := json.Marshal(review)
+	if err := os.WriteFile(path, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishSignature(ctx, cfg, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if upgraded, err := os.ReadFile(path); err != nil || string(upgraded) != string(data) {
+		t.Fatalf("upgrade of previous signature: %s %v", upgraded, err)
 	}
 	var pending int
 	if err := store.db.QueryRow(`SELECT count(*) FROM review_signatures`).Scan(&pending); err != nil || pending != 0 {
