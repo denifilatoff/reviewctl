@@ -36,7 +36,7 @@ func (c ReviewCost) signature() string {
 	return fmt.Sprintf("Model: %s (~$%.1f)", model, *c.USD)
 }
 
-func (c ReviewCost) githubSignature() string {
+func (c ReviewCost) githubSignature(formatTokens func(int64) string) string {
 	if c.Model == "" || !validModel(c.Model) {
 		return ""
 	}
@@ -45,7 +45,7 @@ func (c ReviewCost) githubSignature() string {
 		fields = append(fields, c.Effort)
 	}
 	if c.USD != nil {
-		fields = append(fields, reviewTokenFields(c.Report)...)
+		fields = append(fields, reviewTokenFields(c.Report, formatTokens)...)
 		usd := strconv.FormatFloat(*c.USD, 'g', 2, 64)
 		if rounded, err := strconv.ParseFloat(usd, 64); err == nil {
 			usd = strconv.FormatFloat(rounded, 'f', -1, 64)
@@ -55,7 +55,7 @@ func (c ReviewCost) githubSignature() string {
 	return "<sub>🤖 " + strings.Join(fields, " ") + "</sub>"
 }
 
-func reviewTokenFields(data json.RawMessage) []string {
+func reviewTokenFields(data json.RawMessage, formatTokens func(int64) string) []string {
 	var report struct {
 		Sessions []struct {
 			Input   *int64 `json:"inputTokens"`
@@ -84,14 +84,21 @@ func reviewTokenFields(data json.RawMessage) []string {
 		if missing[i] {
 			continue
 		}
-		count := totals[i]
-		value := strconv.FormatInt(count, 10)
-		if count >= 1000 {
-			value = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%d.%03d", count/1000, count%1000), "0"), ".") + "k"
-		}
-		fields = append(fields, key+"="+value)
+		fields = append(fields, key+"="+formatTokens(totals[i]))
 	}
 	return fields
+}
+
+func roundedTokenCount(count int64) string {
+	return strconv.FormatInt((count+500)/1000, 10) + "k"
+}
+
+func previousTokenCount(count int64) string {
+	if count < 1000 {
+		return strconv.FormatInt(count, 10)
+	}
+	value := fmt.Sprintf("%d.%03d", count/1000, count%1000)
+	return strings.TrimRight(strings.TrimRight(value, "0"), ".") + "k"
 }
 
 func validModel(value string) bool {

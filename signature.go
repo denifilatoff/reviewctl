@@ -94,7 +94,7 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 	if attempt.Cost == nil || !attempt.Success || attempt.Recovered {
 		return fmt.Errorf("attempt has no original review accounting")
 	}
-	signature := attempt.Cost.githubSignature()
+	signature := attempt.Cost.githubSignature(roundedTokenCount)
 	if signature == "" {
 		return nil
 	}
@@ -123,7 +123,15 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 		normalizeGitHubLogin(review.User.Login) != login || !strings.Contains(review.Body, marker) {
 		return fmt.Errorf("submitted review does not match the recorded attempt and authenticated reviewer")
 	}
-	body, err := reviewSignatureBody(review.Body, signature, attempt.Cost.signature())
+	legacy := attempt.Cost.signature()
+	body, err := reviewSignatureBody(review.Body, signature, legacy)
+	if err != nil {
+		previous := attempt.Cost.githubSignature(previousTokenCount)
+		body, err = reviewSignatureBody(review.Body, previous, legacy)
+		if err == nil {
+			body = strings.TrimSuffix(body, previous) + signature
+		}
+	}
 	if err != nil {
 		return err
 	}

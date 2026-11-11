@@ -79,7 +79,8 @@ After the model finishes, the controller adds a signature as the last line of th
 
 The primary session supplies the model and reasoning effort. The token counts and estimated cost cover the review
 run, including its native subagents. `in` excludes cache reads, `cached` counts cache reads, and `out` includes
-reasoning tokens. The signature uses `k` for thousands of tokens and rounds `usd` to two significant digits.
+reasoning tokens. The signature rounds token counts to the nearest thousand and adds `k`.
+It rounds `usd` to two significant digits.
 It omits unavailable fields and skips the signature when the observed model is unavailable. Local history
 keeps the full estimate.
 
