@@ -20,7 +20,13 @@ func TestSignatureDeliveryRetryAndOwnership(t *testing.T) {
 	amount := 0.10910315
 	attempt := Attempt{PullRequest: pr, Success: true, HeadSHA: "0123456789abcdef0123456789abcdef01234567",
 		SkillDigest: "digest", ReviewID: "42", ReviewURL: pr.URL + "#pullrequestreview-42",
-		StartedAt: time.Now(), FinishedAt: time.Now(), Cost: &ReviewCost{Model: "gpt-test", Effort: "low", USD: &amount}}
+		StartedAt: time.Now(), FinishedAt: time.Now(), Cost: &ReviewCost{
+			Model: "gpt-test", Effort: "low", USD: &amount,
+			Report: json.RawMessage(`{"sessions":[
+				{"inputTokens":10000,"cacheReadTokens":40000,"outputTokens":2300,"reasoningOutputTokens":1300},
+				{"inputTokens":2500,"cacheReadTokens":0,"outputTokens":700,"reasoningOutputTokens":400}
+			]}`),
+		}}
 	cfg := Config{Harness: "codex", Publish: true, TrustedAuthors: []string{"dependabot[bot]"},
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}}}
 	store := openTestStore(t)
@@ -47,7 +53,7 @@ func TestSignatureDeliveryRetryAndOwnership(t *testing.T) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || json.Unmarshal(data, &review) != nil ||
-		!strings.Contains(review.Body, "Model: gpt-test low (~$0.1)") || strings.Count(review.Body, signatureStart) != 1 {
+		!strings.HasSuffix(review.Body, "\n\n<sub>🤖 gpt-test low in=12.5k cached=40k out=3k usd=0.11</sub>") || strings.Count(review.Body, signatureStart) != 1 {
 		t.Fatalf("signature readback: %s %v", data, err)
 	}
 	if err := publishSignature(ctx, cfg, attempt); err != nil {
@@ -107,5 +113,29 @@ func TestSignatureDeliveryRotatesPersistentFailures(t *testing.T) {
 	}
 	if errorMessage == "" {
 		t.Fatal("persistent old failures starved a new signature")
+	}
+}
+
+func TestReviewSignatureReplacesLegacyFooter(t *testing.T) {
+	const signature = "<sub>🤖 gpt-test usd=0.0042</sub>"
+	const legacy = "Model: gpt-test (~$0.0)"
+	body := "Findings\n\n" + signatureStart + "\n" + legacy + "\n" + signatureEnd + "\n\nFollow-up"
+	got, err := reviewSignatureBody(body, signature, legacy)
+	want := "Findings\n\n\n\nFollow-up\n\n" + signatureStart + "\n\n" + signature
+	if err != nil || got != want {
+		t.Fatalf("review body = %q, %v; want %q", got, err, want)
+	}
+	withFollowUp := got + "\n\nManual edit"
+	moved, err := reviewSignatureBody(withFollowUp, signature, legacy)
+	if err != nil || !strings.Contains(moved, "Follow-up\n\n\n\nManual edit") || !strings.HasSuffix(moved, signature) {
+		t.Fatalf("review body with a follow-up = %q, %v", moved, err)
+	}
+	for _, edited := range []string{
+		strings.Replace(got, "usd=0.0042", "usd=0.0042 (manually verified)", 1),
+		strings.Replace(body, "(~$0.0)", "(~$0.0) manually verified", 1),
+	} {
+		if _, err := reviewSignatureBody(edited, signature, legacy); err == nil {
+			t.Fatalf("accepted an ambiguous managed footer: %q", edited)
+		}
 	}
 }

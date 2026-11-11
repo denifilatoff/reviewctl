@@ -71,18 +71,25 @@ and their native descendants copied into a temporary directory. No telemetry set
 longer ephemeral: logs remain in the normal Codex home, which may contain review source and prompts. Temporary
 accounting copies are removed after calculation. Do not remove active logs before the review finishes.
 
-After the model finishes, the controller adds one line to the GitHub review, for example
-`Model: gpt-6-astra low (~$0.1)`. Model and reasoning effort come from the primary agent's session.
-The displayed amount is rounded to one decimal place; history keeps full precision.
-The amount includes native subagents, using ccusage's token and inherited-history accounting. It is an
-API-equivalent estimate, not a subscription charge or a billing statement. Internet prices come from ccusage's
-upstream catalog; reviewctl does not maintain a pricing table. Catalog lag and ccusage's pricing fallbacks can
-affect the estimate.
+After the model finishes, the controller adds a signature as the last line of the GitHub review:
+
+```markdown
+<sub>🤖 gpt-6-astra low in=12k cached=40k out=3k usd=0.083</sub>
+```
+
+The primary session supplies the model and reasoning effort. The token counts and estimated cost cover the review
+run, including its native subagents. `in` excludes cache reads, `cached` counts cache reads, and `out` includes
+reasoning tokens. The signature uses `k` for thousands of tokens and rounds `usd` to two significant digits.
+It omits unavailable fields and skips the signature when the observed model is unavailable. Local history
+keeps the full estimate.
+
+The cost estimates equivalent API usage. It does not represent a subscription charge or a billing statement.
+Prices come from ccusage's catalog. Catalog lag and ccusage's pricing fallbacks can affect the estimate.
 
 Missing ccusage, unreadable or incomplete logs, model-attribution fallbacks, warnings, or invalid reports produce
-`cost unavailable`, not a guessed total. Review publication still succeeds. Accounting has a separate 30-second
-timeout after Codex exits. `reviewctl --json status` exposes session IDs, calculator version, calculation time,
-the report, and any accounting error; `doctor` does not validate pricing availability.
+an unavailable estimate. The signature omits cost and unverified token counts, and review publication still succeeds.
+Accounting has a separate 30-second timeout after Codex exits. `reviewctl --json status` exposes session IDs,
+calculator version, calculation time, the report, and any accounting error. `doctor` does not check prices.
 
 Failed signature delivery is saved in SQLite and retried by the next `run`, without repeating the review.
 `run` reports `signature_pending` and exits with code `1` until delivery succeeds. An unavailable estimate is
