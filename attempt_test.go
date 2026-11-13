@@ -35,19 +35,22 @@ func TestRunCommandPropagatesCancellation(t *testing.T) {
 	}
 }
 
-func TestTrustedInstructionAuthorizesOwnedDiscussionSynchronization(t *testing.T) {
+func TestTrustedInstructionRequestsOwnedDiscussionPlan(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	instruction := trustedInstruction(pr, "head", "digest", "/source", "/receipt", []string{"PRRT_owned"})
 	for _, required := range []string{
 		`Pre-existing owned discussion thread IDs: ["PRRT_owned"]`,
-		"Synchronize every listed discussion according to the installed skill",
+		"Reassess every listed owned discussion",
+		"The controller owns GitHub publication",
+		"Publish: false",
+		"Keep that SHA even if the pull request changes",
 	} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("trusted instruction does not contain %q", required)
 		}
 	}
-	if strings.Contains(instruction, "any other GitHub state") {
-		t.Fatal("trusted instruction still forbids authorized discussion synchronization")
+	if strings.Contains(instruction, "publish exactly one") {
+		t.Fatal("trusted instruction authorizes agent publication")
 	}
 }
 
@@ -58,7 +61,7 @@ func TestTrustedInstructionAuthorizesEscalatedGitHubCLIFallback(t *testing.T) {
 		"Set sandbox_permissions=require_escalated for GitHub CLI API commands",
 		"Do not use sandboxed gh auth status",
 		"Do not use a browser fallback",
-		"Do not ask for another publication confirmation",
+		"Use GitHub APIs only for reads",
 	} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("trusted instruction does not contain %q", required)
@@ -451,36 +454,29 @@ func TestValidateReceiptRejectsNonPositiveDecimalReviewIDs(t *testing.T) {
 	}
 }
 
-func TestReadReceiptAcceptsNumericAndQuotedReviewIDs(t *testing.T) {
+func TestReadDraftAcceptsReviewContent(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
-	for _, body := range []string{
-		`{"review_id":4985115476}`,
-		`{"review_id":"4985115476"}`,
-	} {
-		path := filepath.Join(t.TempDir(), "receipt.json")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		receipt, err := readReceipt(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", body, err)
-		}
-		if receipt.ReviewID != "4985115476" {
-			t.Fatalf("review ID = %q", receipt.ReviewID)
-		}
-		receipt.Provider, receipt.Repository, receipt.Number = "github", "acme/service", 7
-		receipt.HeadSHA, receipt.SkillDigest, receipt.Verdict = "head", "digest", "APPROVE"
-		receipt.ReviewURL = "https://github.com/acme/service/pull/7#pullrequestreview-4985115476"
-		if err := ValidateReceipt(receipt, pr, "head", "digest", false); err != nil {
-			t.Fatalf("validate %s: %v", body, err)
-		}
+	body := `{"provider":"github","repository":"acme/service","number":7,
+		"head_sha":"head","skill_digest":"digest","verdict":"APPROVE",
+		"body":"No findings.","comments":[],"discussions":[]}`
+	file := filepath.Join(t.TempDir(), "draft.json")
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := readDraft(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest"}
+	if err := validateDraft(draft, attempt, nil, false); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestReadReceiptRejectsInvalidInput(t *testing.T) {
+func TestReadDraftRejectsInvalidInput(t *testing.T) {
 	for _, body := range []string{
-		`{"review_id":"4985115476","unexpected":true}`,
-		`{"review_id":"4985115476"} {}`,
+		`{"body":"summary","unexpected":true}`,
+		`{"body":"summary"} {}`,
 		`{"review_id":""}`,
 		`{"review_id":"not-a-number"}`,
 	} {
@@ -488,8 +484,8 @@ func TestReadReceiptRejectsInvalidInput(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := readReceipt(path); err == nil {
-			t.Fatalf("accepted invalid receipt %s", body)
+		if _, err := readDraft(path); err == nil {
+			t.Fatalf("accepted invalid draft %s", body)
 		}
 	}
 }

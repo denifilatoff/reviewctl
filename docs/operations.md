@@ -71,7 +71,7 @@ and their native descendants copied into a temporary directory. No telemetry set
 longer ephemeral: logs remain in the normal Codex home, which may contain review source and prompts. Temporary
 accounting copies are removed after calculation. Do not remove active logs before the review finishes.
 
-After the model finishes, the controller adds a signature as the last line of the GitHub review:
+After the model finishes, the controller includes a signature as the last line of the initial GitHub review body:
 
 ```markdown
 <sub>🤖 gpt-6-astra low in=12k cached=40k out=3k usd=0.083</sub>
@@ -92,9 +92,29 @@ an unavailable estimate. The signature omits cost and unverified token counts, a
 Accounting has a separate 30-second timeout after Codex exits. `reviewctl --json status` exposes session IDs,
 calculator version, calculation time, the report, and any accounting error. `doctor` does not check prices.
 
-Failed signature delivery is saved in SQLite and retried by the next `run`, without repeating the review.
-`run` reports `signature_pending` and exits with code `1` until delivery succeeds. An unavailable estimate is
-not automatically recalculated. Recovery of an existing review does not replace its original model or cost.
+## Review publication and retries
+
+Codex prepares the summary, inline findings, and actions for existing owned discussions. ReviewCTL validates that draft
+for the pinned commit and saves it with its accounting before publishing. A `publication_failed` result retains the
+prepared publication. The next `run` resumes delivery using the original draft and usage.
+
+`draft_rejected` means GitHub returned a request validation error and readback found no published review. ReviewCTL
+retires that draft and supplies the validation error to the next Codex attempt so it can prepare a corrected review.
+
+`review_dismissed` reports that GitHub dismissed the marked review for the current head. Inspect its dismissal reason
+on GitHub. A newer PR head is assessed independently.
+
+ReviewCTL checks the current head before sending a new review. `head_changed` leaves the PR queued for its new revision.
+If the head changes just after the check, GitHub attaches the review to the explicit commit, and the final check keeps
+the PR queued. The submitted review already contains its accounting signature.
+
+Review and reply markers let a retry recover a successful request whose response was lost. `discussion_changed`
+retains the PR for reassessment when a human reply or state change invalidates a saved discussion action. Check the
+reported PR in GitHub, then allow the next scheduled `run` to reassess it.
+
+Prepared publications in SQLite contain the review text, inline findings, and proposed replies until delivery completes.
+Existing pending signature deliveries are retried separately. `signature_pending` returns exit code `1` until such
+a delivery succeeds. An unavailable cost estimate is not automatically recalculated.
 
 ## Run in production on macOS
 

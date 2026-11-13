@@ -63,17 +63,17 @@ flowchart LR
     Run --> GH["GitHub through gh"]
     Run --> APM["APM"]
     Run --> Codex["Codex"]
-    Codex --> GH
+    Codex -->|read context| GH
 ```
 
 | Component | Responsibility |
 | --- | --- |
 | CLI | Parse commands, validate local input, and perform short SQLite operations |
 | Run cycle | Discover changes and process one queue snapshot sequentially |
-| GitHub code | Resolve repositories, pull requests, authors, and current heads through `gh` |
-| Codex code | Start and cancel Codex, then decode its receipt |
+| GitHub code | Resolve PR state, publish reviews, synchronize owned discussions, and verify readback |
+| Codex code | Start and cancel Codex, then decode the prepared review draft |
 | APM | Install the locked review skills into a fresh attempt workspace |
-| SQLite | Store discovery baselines, the pending pull request set, and review history |
+| SQLite | Store discovery baselines, queued PRs, prepared publications, and review history |
 
 ## Configuration
 
@@ -104,8 +104,8 @@ runtime registries, capability negotiation, or plugin loading.
 `trusted_authors` must contain at least one exact GitHub login. Comparison is case-insensitive after normalization. An
 empty list blocks discovery and execution.
 
-Automatic publication requires `publish: true`. This permission is checked before each Codex invocation and is
-included in the trusted instruction. GitHub and Codex credentials remain owned by their CLIs.
+Automatic publication requires `publish: true`. ReviewCTL checks this permission before invoking Codex and before
+publishing. The agent receives a read-only review task. GitHub and Codex credentials remain owned by their CLIs.
 
 `attempt_timeout` bounds one complete review attempt. It defaults to one hour and accepts a positive Go duration up to
 24 hours. Timeout or cancellation terminates the Codex process group, records a stable failure, and leaves the pull
@@ -165,10 +165,15 @@ insertion order. Entries added after the snapshot wait for the next invocation.
 can queue the pull request again after its author becomes trusted, it is reopened, or its draft status changes. The
 operating-system schedule supplies the retry cadence; the MVP has no retry loop, backoff policy, or retry counter.
 
-This model provides crash recovery without a running state. A pull request remains queued until success. If Codex
-publishes a review, its accounting signature is queued before the final head check and history write. If the process
-then exits, the next run recovers the existing review through its marker and readback instead of publishing a duplicate,
-and the saved signature is delivered without replacing its original accounting.
+ReviewCTL saves a prepared publication in the `review_publications` table before any GitHub write. The row contains
+the pinned attempt, original accounting, final review body, inline comments, reviewer login, and initial discussion
+snapshot. A retry loads this row and checks GitHub for the review marker before sending a request. The original
+accounting is recorded once, including when the process exits after publication and before the history transaction.
+Successful delivery clears the prepared publication in the history transaction.
+
+Known revision drift, an eligibility rejection, a stale discussion action, or a confirmed GitHub draft rejection also
+retires the prepared publication after recording its original accounting. Uncertain request failures retain it for
+readback and retry.
 
 ## History
 
@@ -182,8 +187,8 @@ with:
 - published review identifier and URL when available; and
 - a bounded error code and message on failure.
 
-The MVP does not copy the complete published review body into SQLite because GitHub already stores it. The history
-schema may add the body later if local, unpublished reviews need durable retrieval.
+History stores review identifiers and accounting. The separate prepared-publication row retains review text and
+discussion replies until delivery completes. These drafts may contain source excerpts and other review context.
 
 History is append-only for normal operation. Retention and telemetry export are outside the MVP.
 
@@ -237,17 +242,22 @@ The execution path is linear:
 3. Create a fresh temporary workspace.
 4. Install and hash the locked skill set with APM.
 5. Write one trusted instruction.
-6. Run Codex. The instruction requires Codex to check the marker, publish when needed, and read the review back.
-7. Validate the receipt and current head.
-8. Remove the entire workspace.
-9. Record history, then remove the queue entry after confirmed success or an eligibility rejection.
+6. Run Codex to prepare a draft for the pinned SHA, including proposed actions for owned discussions.
+7. Validate the draft, add the marker and available accounting signature, and save the prepared publication.
+8. Recheck eligibility and the head, publish through `gh`, verify readback, and synchronize owned discussions.
+9. Remove the workspace, record history, and remove the queue entry after confirmed success or an eligibility rejection.
+
+A saved publication resumes before another Codex invocation. An existing marked review is recovered after verifying
+its author, commit, URL, and submitted event. Owned discussions can be reassessed by Codex when another delivery
+attempt has no saved plan.
 
 `APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
 valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
 These outcomes are not process failures.
 
-If the head changes before or during the attempt, the attempt does not publish for the old head. The queue entry stays
-in place, and the next run resolves the new head.
+If the head changes before the publication check, ReviewCTL returns `head_changed` and keeps the PR queued.
+GitHub review creation includes the pinned `commit_id`. A change after the check leaves the review attached to that
+explicit commit with its accounting signature. The final head check keeps the new revision queued.
 
 ## Trust and publication
 
@@ -257,20 +267,22 @@ Codex starts. An untrusted pull request is never cloned, executed, or published.
 The trusted instruction limits Codex to one repository, pull request, expected head SHA, installed skill set, and
 publication policy. Repository instructions may guide review and test commands, but they cannot broaden that scope.
 
-Codex and the installed review skill own review analysis and GitHub publication. `reviewctl` does not compose inline
-comments or call the GitHub Review API itself.
+Codex and the locked review skill produce a structured draft containing the pinned scope, verdict, summary, inline
+comments, and one proposed action for each owned discussion. The instruction forbids GitHub writes and switching
+the attempt to another SHA. ReviewCTL validates the draft before preparing an external request.
 
-Before publication, Codex must check the current head and the exact idempotency marker. If the marker already exists,
-Codex reads that review instead of publishing again. After publication, Codex reads the new review back. In both cases,
-it returns a short receipt containing the actual submitted or recovered review event, head SHA, review identifier, and
-review URL. A GitHub `COMMENTED` event maps to receipt verdict `COMMENT`, even when the review body recommends changes.
+ReviewCTL owns review creation and discussion writes. Its initial review request includes the exact `commit_id`,
+idempotency marker, and available accounting signature. Readback verifies the reviewer, commit, URL, event, body, and
+inline comments. A saved publication requires the same authenticated reviewer on retry.
 
-`reviewctl` validates the receipt and checks the final head through `gh`. It does not implement marker lookup, review
-composition, publication, or review readback. A valid receipt for a recovered marker is a successful result.
+Before changing a discussion, ReviewCTL verifies that the authenticated reviewer authored its root comment and that
+pre-existing comments remain intact. Each reply contains a marker tied to the prepared publication and thread. A retry
+recovers that reply before attempting another write. Resolve and reopen operations follow the proposed action and are
+verified against the complete discussion snapshot. `discussion_changed` keeps the PR queued for reassessment when
+human comments or state changes invalidate a saved action.
 
-Before Codex, `reviewctl` resolves the authenticated GitHub login directly through `gh`. A self-authored pull request
-requires a `COMMENT` receipt. Other pull requests require `APPROVE` or `REQUEST_CHANGES`; receipt data cannot establish
-reviewer identity.
+The controller resolves the authenticated GitHub login directly through `gh`. For a self-authored PR it submits
+`COMMENT` while retaining the assessment in the review body. Other PRs receive `APPROVE` or `REQUEST_CHANGES`.
 
 The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
 running as that user or prove who authored every commit in a trusted pull request.
@@ -286,7 +298,7 @@ Each attempt runs:
 apm install --frozen --root <attempt-workspace> --target codex
 ```
 
-`reviewctl` hashes the installed skill set once and includes the digest in the instruction, marker, receipt validation,
+`reviewctl` hashes the installed skill set once and includes the digest in the instruction, marker, draft validation,
 and history. An APM failure stops the attempt before Codex starts and is recorded in history.
 
 `reviewctl` does not implement skill lookup, copying, snapshot recovery, or configuration precedence. Updating review
@@ -294,11 +306,11 @@ skills means updating the checked-in APM lockfile.
 
 ## Workspace
 
-Each attempt uses a new temporary directory. The workspace contains the APM installation, trusted instruction, receipt
+Each attempt uses a new temporary directory. The workspace contains the APM installation, trusted instruction, draft
 path, and source checkout. The implementation uses ordinary temporary-directory creation and recursive removal.
 
-The workspace is deleted after success or failure. A later retry creates a new workspace. SQLite retains only bounded
-history, not source files, diffs, or complete process output.
+The workspace is deleted after success or failure. A later retry creates a new workspace. SQLite retains history and unfinished publications with their original accounting. Review text is removed from the
+prepared-publication table after delivery completes.
 
 The MVP does not recover, reuse, fence, reference-count, or selectively clean workspaces. It does not implement custom
 filesystem capabilities or defend against the trusted local user replacing files during execution.
@@ -309,7 +321,7 @@ GitHub-specific calls live together, and Codex-specific process handling lives t
 two narrow boundaries without a runtime plugin registry.
 
 A GitLab implementation may later add provider-specific discovery and merge request handling. Another harness may
-later add its own command and receipt decoding. Neither future implementation is part of the MVP, and the MVP does not
+later add its own command and draft decoding. Neither future implementation is part of the MVP, and the MVP does not
 normalize features that GitHub and Codex do not need.
 
 ## CLI surface
@@ -424,5 +436,5 @@ recovery without requiring a fixture head change.
 - GitLab or a harness other than Codex.
 - Workspace reuse or recovery.
 - A custom secure filesystem layer.
-- Storing complete diffs, source trees, or published review bodies in SQLite.
+- Storing complete diffs or source trees in SQLite.
 - A service installer, self-update, or Windows support. Packaged binary releases support macOS and Linux.

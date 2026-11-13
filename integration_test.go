@@ -1046,10 +1046,8 @@ repositories:
 		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
 		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
 	}
-	reviewData, err = os.ReadFile(reviewPath)
-	if err != nil || json.Unmarshal(reviewData, &review) != nil ||
-		!strings.HasSuffix(review.Body, "\n\n<sub>🤖 gpt-test high</sub>") {
-		t.Fatalf("moving-head review lost accounting signature: %s %v", reviewData, err)
+	if _, err := os.Stat(reviewPath); !os.IsNotExist(err) {
+		t.Fatalf("moving-head review was published: %v", err)
 	}
 }
 
@@ -1279,9 +1277,9 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 				t.Fatalf("self-authored COMMENT failed: %+v", result)
 			}
 			var pending int
-			if err := store.db.QueryRow(`SELECT count(*) FROM review_signatures`).Scan(&pending); err != nil ||
+			if err := store.db.QueryRow(`SELECT count(*) FROM review_publications`).Scan(&pending); err != nil ||
 				pending != map[bool]int{true: 1, false: 0}[test.wantError == ""] {
-				t.Fatalf("durable signature before Finish: pending=%d err=%v", pending, err)
+				t.Fatalf("durable publication before Finish: pending=%d err=%v", pending, err)
 			}
 			if test.wantError != "" && (result.Success || result.ErrorCode != test.wantError) {
 				t.Fatalf("ordinary COMMENT result: %+v", result)
@@ -1333,7 +1331,7 @@ func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
 	}
 }
 
-func TestProcessAttemptRejectsRecoveryStateThatDisagreesWithGitHub(t *testing.T) {
+func TestProcessAttemptRecoversWithoutAgentReportedState(t *testing.T) {
 	temp := t.TempDir()
 	fakeBin := installProcessHelpers(t, temp)
 	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
@@ -1348,13 +1346,16 @@ func TestProcessAttemptRejectsRecoveryStateThatDisagreesWithGitHub(t *testing.T)
 		Repositories: []Repository{{Provider: "github", Repository: "acme/service"}},
 	}
 	store := openTestStore(t)
-	if result := ProcessAttempt(context.Background(), cfg, store, pr); !result.Success || result.Recovered {
+	result := ProcessAttempt(context.Background(), cfg, store, pr)
+	if !result.Success || result.Recovered {
 		t.Fatalf("initial publication result: %+v", result)
 	}
-	t.Setenv("REVIEWCTL_FAKE_RECOVERED", "false")
-	result := ProcessAttempt(context.Background(), cfg, store, pr)
-	if result.Success || result.ErrorCode != "receipt_invalid" {
-		t.Fatalf("mismatched recovery result: %+v", result)
+	if err := store.Finish(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	result = ProcessAttempt(context.Background(), cfg, store, pr)
+	if !result.Success || !result.Recovered || result.Cost != nil {
+		t.Fatalf("controller recovery result: %+v", result)
 	}
 }
 
@@ -1620,18 +1621,108 @@ func helperGit(args []string) {
 }
 
 func helperGH(args []string) {
+	state := os.Getenv("REVIEWCTL_FAKE_STATE")
+	if len(args) >= 4 && args[0] == "api" && args[1] == "--method" && args[2] == "POST" && strings.HasSuffix(args[3], "/reviews") {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(76)
+		}
+		var request struct {
+			Commit   string          `json:"commit_id"`
+			Event    string          `json:"event"`
+			Body     string          `json:"body"`
+			Comments []ReviewComment `json:"comments"`
+		}
+		if json.Unmarshal(data, &request) != nil || request.Commit == "" {
+			os.Exit(76)
+		}
+		if os.Getenv("REVIEWCTL_FAKE_REJECT_POST") != "" {
+			fmt.Print(`{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"comments","code":"invalid"}],"status":"422"}`)
+			fmt.Fprintln(os.Stderr, "gh: Validation Failed (HTTP 422)")
+			os.Exit(1)
+		}
+		parts := strings.Split(args[3], "/")
+		if len(parts) != 6 {
+			os.Exit(76)
+		}
+		review := submittedReview{ID: 123, Commit: request.Commit, Body: request.Body,
+			URL:   fmt.Sprintf("https://github.com/%s/%s/pull/%s#pullrequestreview-123", parts[1], parts[2], parts[4]),
+			State: map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}[request.Event]}
+		review.User.Login = os.Getenv("REVIEWCTL_FAKE_LOGIN")
+		if review.User.Login == "" {
+			review.User.Login = "reviewer"
+		}
+		encoded, _ := json.Marshal(review)
+		comments, _ := json.Marshal([][]ReviewComment{request.Comments})
+		for name, contents := range map[string][]byte{state: []byte("123"), state + ".review.json": encoded,
+			state + ".request.json": data, state + ".comments.json": comments,
+			state + ".posts": []byte(strconv.Itoa(readTestCounter(state+".posts") + 1))} {
+			if os.WriteFile(name, contents, 0o600) != nil {
+				os.Exit(76)
+			}
+		}
+		if os.Getenv("REVIEWCTL_FAKE_LOST_POST_RESPONSE") != "" {
+			os.Exit(76)
+		}
+		os.Stdout.Write(encoded)
+		return
+	}
+	if len(args) >= 4 && args[0] == "api" && args[1] == "--method" && args[2] == "POST" && strings.HasSuffix(args[3], "/replies") {
+		var request struct{ Body string }
+		if json.NewDecoder(os.Stdin).Decode(&request) != nil {
+			os.Exit(76)
+		}
+		threads := fakeGHThreads()
+		threads[0].Comments = append(threads[0].Comments, githubReviewComment{
+			DatabaseID: 2, Author: "reviewer", ReplyToID: 1, Body: request.Body})
+		payload, _ := json.Marshal(threads)
+		if os.WriteFile(state+".threads.json", payload, 0o600) != nil {
+			os.Exit(76)
+		}
+		if os.Getenv("REVIEWCTL_FAKE_LOST_REPLY_RESPONSE") != "" {
+			os.Exit(76)
+		}
+		fmt.Print(`{"id":2}`)
+		return
+	}
+	if len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/reviews/") && strings.HasSuffix(args[1], "/comments") {
+		data, err := os.ReadFile(state + ".comments.json")
+		if err != nil {
+			os.Exit(76)
+		}
+		os.Stdout.Write(data)
+		return
+	}
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		threads := fakeGHThreads()
+		if len(args) >= 4 && args[2] == "--input" {
+			var request struct{ Query string }
+			if json.NewDecoder(os.Stdin).Decode(&request) != nil || len(threads) == 0 {
+				os.Exit(76)
+			}
+			threads[0].IsResolved = !strings.Contains(request.Query, "unresolveReviewThread")
+			data, _ := json.Marshal(threads)
+			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
+				os.Exit(76)
+			}
+			fmt.Print(`{"data":{}}`)
+			return
+		}
 		nodes := []any{}
-		if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
-			resolved := false
-			if os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION") == "resolved" {
-				_, err := os.Stat(os.Getenv("REVIEWCTL_FAKE_STATE"))
-				resolved = err == nil
+		for _, thread := range threads {
+			comments := []any{}
+			for _, comment := range thread.Comments {
+				var replyTo any
+				if comment.ReplyToID != 0 {
+					replyTo = map[string]int64{"databaseId": comment.ReplyToID}
+				}
+				comments = append(comments, map[string]any{"databaseId": comment.DatabaseID, "body": comment.Body,
+					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo})
 			}
 			nodes = append(nodes, map[string]any{
-				"id": "PRRT_owned", "isResolved": resolved,
+				"id": thread.ID, "isResolved": thread.IsResolved,
 				"comments": map[string]any{
-					"nodes":    []any{map[string]any{"databaseId": 1, "author": map[string]string{"login": "reviewer"}, "replyTo": nil}},
+					"nodes":    comments,
 					"pageInfo": map[string]bool{"hasNextPage": false},
 				},
 			})
@@ -1800,6 +1891,11 @@ func helperGH(args []string) {
 		number := int64(7)
 		author := "dependabot[bot]"
 		head := "0123456789abcdef0123456789abcdef01234567"
+		if os.Getenv("REVIEWCTL_FAKE_HEAD_AFTER_POST") != "" {
+			if _, err := os.Stat(os.Getenv("REVIEWCTL_FAKE_STATE")); err == nil {
+				head = "fedcba9876543210fedcba9876543210fedcba98"
+			}
+		}
 		state := os.Getenv("REVIEWCTL_FAKE_PR_STATE")
 		if state == "" {
 			state = "OPEN"
@@ -1832,6 +1928,21 @@ func helperGH(args []string) {
 		return
 	}
 	os.Exit(92)
+}
+
+func fakeGHThreads() []githubReviewThread {
+	var threads []githubReviewThread
+	if data, err := os.ReadFile(os.Getenv("REVIEWCTL_FAKE_STATE") + ".threads.json"); err == nil {
+		if json.Unmarshal(data, &threads) != nil {
+			os.Exit(76)
+		}
+		return threads
+	}
+	if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
+		threads = append(threads, githubReviewThread{ID: "PRRT_owned",
+			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}})
+	}
+	return threads
 }
 
 func appendDoctorCall(path, call string) {
@@ -1981,42 +2092,35 @@ func helperCodex(args []string) {
 		}
 	}
 	number, _ := strconv.ParseInt(fields["Pull request"], 10, 64)
-	state := os.Getenv("REVIEWCTL_FAKE_STATE")
-	_, statErr := os.Stat(state)
-	recovered := statErr == nil
-	if forced := os.Getenv("REVIEWCTL_FAKE_RECOVERED"); forced != "" {
-		recovered = forced == "true"
-	}
-	if !recovered {
-		os.WriteFile(state, []byte("123"), 0o600)
+	if file := os.Getenv("REVIEWCTL_FAKE_CODEX_CALLS"); file != "" {
+		if os.WriteFile(file, []byte(strconv.Itoa(readTestCounter(file)+1)), 0o600) != nil {
+			os.Exit(95)
+		}
+		if os.WriteFile(file+".instruction", instruction, 0o600) != nil {
+			os.Exit(95)
+		}
 	}
 	verdict := os.Getenv("REVIEWCTL_FAKE_VERDICT")
 	if verdict == "" {
 		verdict = "APPROVE"
 	}
-	receipt := Receipt{
-		Provider: "github", Repository: fields["Repository"], Number: number, HeadSHA: fields["Expected head"],
-		SkillDigest: fields["Skill digest"], Verdict: verdict, ReviewID: "123",
-		ReviewURL: fmt.Sprintf("https://github.com/%s/pull/%d#pullrequestreview-123", fields["Repository"], number),
-		Recovered: recovered, DiscussionOutcomes: []DiscussionOutcome{},
-	}
+	draft := ReviewDraft{Provider: "github", Repository: fields["Repository"], Number: number,
+		HeadSHA: fields["Expected head"], SkillDigest: fields["Skill digest"], Verdict: verdict,
+		Body: "Review findings", Comments: []ReviewComment{}, Discussions: []DiscussionAction{}}
 	if action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION"); action != "" {
-		receipt.DiscussionOutcomes = append(receipt.DiscussionOutcomes,
-			DiscussionOutcome{ThreadID: "PRRT_owned", Action: action})
+		body := ""
+		if strings.HasSuffix(action, "_with_reply") {
+			body = "Verified the updated implementation."
+		}
+		draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: "PRRT_owned", Action: action, Body: body})
+	}
+	if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
+		draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: "A finding."})
 	}
 	if head := os.Getenv("REVIEWCTL_FAKE_RECEIPT_HEAD"); head != "" {
-		receipt.HeadSHA = head
+		draft.HeadSHA = head
 	}
-	data, _ := json.Marshal(receipt)
-	if !recovered {
-		review := submittedReview{ID: 123, Body: "Review findings\n\n" + fields["Idempotency marker"], Commit: receipt.HeadSHA, URL: receipt.ReviewURL}
-		review.User.Login = "reviewer"
-		if login := os.Getenv("REVIEWCTL_FAKE_LOGIN"); login != "" {
-			review.User.Login = login
-		}
-		payload, _ := json.Marshal(review)
-		os.WriteFile(state+".review.json", payload, 0o600)
-	}
+	data, _ := json.Marshal(draft)
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
 	}
