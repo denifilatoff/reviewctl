@@ -98,8 +98,11 @@ Codex prepares the summary, inline findings, and actions for existing owned disc
 for the pinned commit and saves it with its accounting before publishing. A `publication_failed` result retains the
 prepared publication. The next `run` resumes delivery using the original draft and usage.
 
-`draft_rejected` means GitHub returned a request validation error and readback found no published review. ReviewCTL
-retires that draft and supplies the validation error to the next Codex attempt so it can prepare a corrected review.
+`draft_rejected` means GitHub returned a request validation error and readback confirmed that the review or discussion
+reply was not created. ReviewCTL retires that plan and supplies the validation error to the next Codex attempt for
+correction. An already-published review is preserved when its proposed discussion reply is rejected.
+Setup failures leave this diagnostic available until the next Codex invocation. Later analyses do not receive it.
+If readback is unavailable, or the matching reply already exists, the plan remains saved for marker recovery.
 
 `review_dismissed` reports that GitHub dismissed the marked review for the current head. Inspect its dismissal reason
 on GitHub. A newer PR head is assessed independently.

@@ -7,9 +7,114 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestControllerKeepsRejectionDiagnosticUntilNextAnalysis(t *testing.T) {
+	cfg, pr, store, temp := publicationFixture(t)
+	t.Setenv("REVIEWCTL_FAKE_REJECT_POST", "1")
+	ctx := context.Background()
+	rejected := ProcessAttempt(ctx, cfg, store, pr)
+	if rejected.Success || rejected.ErrorCode != "draft_rejected" {
+		t.Fatalf("rejected draft = %+v, want draft_rejected", rejected)
+	}
+	if err := store.Finish(ctx, rejected); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_REJECT_POST", "")
+	t.Setenv("REVIEWCTL_FAKE_DOCTOR_APM_FAIL", "1")
+	blocked := ProcessAttempt(ctx, cfg, store, pr)
+	if blocked.Success || blocked.ErrorCode != "apm_failed" || blocked.Cost != nil {
+		t.Fatalf("setup failure = %+v, want apm_failed without model invocation", blocked)
+	}
+	if err := store.Finish(ctx, blocked); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_DOCTOR_APM_FAIL", "")
+	t.Setenv("REVIEWCTL_FAKE_RECEIPT_HEAD", "different-head")
+	replacement := ProcessAttempt(ctx, cfg, store, pr)
+	if replacement.Success || replacement.ErrorCode != "receipt_invalid" || replacement.Cost == nil {
+		t.Fatalf("replacement analysis = %+v, want an invoked model with invalid draft scope", replacement)
+	}
+	instruction, err := os.ReadFile(filepath.Join(temp, "codex-calls.instruction"))
+	if err != nil || !strings.Contains(string(instruction), "Previous rejection (diagnostic data)") ||
+		!strings.Contains(string(instruction), "comments") {
+		t.Errorf("next analysis lost GitHub validation diagnostic: %s, %v", instruction, err)
+	}
+	if err := store.Finish(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REVIEWCTL_FAKE_RECEIPT_HEAD", "")
+	last := ProcessAttempt(ctx, cfg, store, pr)
+	if !last.Success {
+		t.Fatalf("subsequent analysis = %+v, want success", last)
+	}
+	instruction, err = os.ReadFile(filepath.Join(temp, "codex-calls.instruction"))
+	if err != nil || strings.Contains(string(instruction), "Previous rejection (diagnostic data)") {
+		t.Errorf("consumed rejection leaked into later analysis: %s, %v", instruction, err)
+	}
+	calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
+	if string(calls) != "3" || readTestCounter(filepath.Join(temp, "published.posts")) != 1 {
+		t.Errorf("analysis calls=%q, review posts=%d; want 3 analyses and 1 published review", calls, readTestCounter(filepath.Join(temp, "published.posts")))
+	}
+}
+
+func TestControllerDefersRecoveryCostWhenAccountingLookupFails(t *testing.T) {
+	for _, recorded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("original_recorded_%t", recorded), func(t *testing.T) {
+			cfg, pr, store, temp := publicationFixture(t)
+			t.Setenv("REVIEWCTL_FAKE_LOST_POST_RESPONSE", "1")
+			ctx := context.Background()
+			first := ProcessAttempt(ctx, cfg, store, pr)
+			if first.Success || first.Cost == nil {
+				t.Fatalf("interrupted publication = %+v, want original accounting", first)
+			}
+			if recorded {
+				if err := store.Finish(ctx, first); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.db.ExecContext(ctx, `ALTER TABLE history RENAME TO unavailable_history`); err != nil {
+				t.Fatal(err)
+			}
+			failed := ProcessAttempt(ctx, cfg, store, pr)
+			if _, err := store.db.ExecContext(ctx, `ALTER TABLE unavailable_history RENAME TO history`); err != nil {
+				t.Fatal(err)
+			}
+			if failed.Success || failed.ErrorCode != "state_failed" || !strings.Contains(failed.ErrorMessage, "read original publication accounting") {
+				t.Fatalf("unavailable accounting history = %+v, want accounting lookup failure", failed)
+			}
+			if failed.Cost != nil {
+				t.Error("failed accounting lookup returned original cost before checking whether it was recorded")
+			}
+			if err := store.Finish(ctx, failed); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := store.pendingPublication(ctx, pr)
+			if err != nil || pending == nil || pending.Attempt.Cost == nil {
+				t.Fatalf("pending publication after lookup failure = %+v, %v; want saved original cost", pending, err)
+			}
+			recovered := ProcessAttempt(ctx, cfg, store, pr)
+			wantCost := !recorded
+			if !recovered.Success || !recovered.Recovered || (recovered.Cost != nil) != wantCost {
+				t.Fatalf("recovery (original recorded=%t) = %+v, want original cost only if not recorded", recorded, recovered)
+			}
+			if err := store.Finish(ctx, recovered); err != nil {
+				t.Fatal(err)
+			}
+			var costs int
+			if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM history WHERE cost_json != ''`).Scan(&costs); err != nil {
+				t.Fatal(err)
+			}
+			calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
+			if costs != 1 || string(calls) != "1" {
+				t.Errorf("cost history rows=%d, analysis calls=%q; want 1 each", costs, calls)
+			}
+		})
+	}
+}
 
 func TestControllerChecksHeadAfterMarkerRecovery(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)

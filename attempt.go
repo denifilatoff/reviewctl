@@ -118,6 +118,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	if pending != nil {
 		started := result.StartedAt
 		result = pending.Attempt
+		result.StartedAt, result.Cost = started, nil
 		var recorded bool
 		if err := store.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM history
 			WHERE provider = ? AND repository = ? AND change_number = ? AND started_at = ? AND cost_json != '')`,
@@ -125,8 +126,8 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 			setAttemptError(&result, fail("state_failed", "read original publication accounting: %v", err))
 			return result
 		}
-		if recorded {
-			result.StartedAt, result.Cost = started, nil
+		if !recorded {
+			result.StartedAt, result.Cost = pending.Attempt.StartedAt, pending.Attempt.Cost
 		}
 	}
 	resolved, err := resolveGitHub(ctx, pr)
@@ -217,7 +218,9 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	var rejection string
 	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT
 		CASE WHEN error_code = 'draft_rejected' THEN error_message ELSE '' END FROM history
-		WHERE provider = ? AND repository = ? AND change_number = ? AND head_sha = ? ORDER BY id DESC LIMIT 1), '')`,
+		WHERE provider = ? AND repository = ? AND change_number = ? AND head_sha = ?
+		AND (cost_json != '' OR error_code = 'draft_rejected' OR success = 1)
+		ORDER BY id DESC LIMIT 1), '')`,
 		pr.Provider, pr.Repository, pr.Number, result.HeadSHA).Scan(&rejection); err != nil {
 		setAttemptError(&result, fail("state_failed", "read previous draft rejection: %v", err))
 		return result

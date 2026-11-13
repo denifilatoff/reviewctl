@@ -229,6 +229,11 @@ func validatePublicationSnapshot(initial, current []githubReviewThread) error {
 	return nil
 }
 
+func isGitHubValidationError(err error) bool {
+	var apiError *githubAPIError
+	return errors.As(err, &apiError) && (apiError.Status == 400 || apiError.Status == 422)
+}
+
 func deliverPublication(ctx context.Context, cfg Config, publication Publication) (Attempt, error) {
 	result := publication.Attempt
 	pr := result.PullRequest
@@ -268,8 +273,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 			"body": publication.Draft.Body, "comments": publication.Draft.Comments}
 		if err := githubJSON(ctx, []string{"--method", "POST", fmt.Sprintf("repos/%s/pulls/%d/reviews", pr.Repository, pr.Number)},
 			request, &review); err != nil {
-			var apiError *githubAPIError
-			if errors.As(err, &apiError) && (apiError.Status == 400 || apiError.Status == 422) {
+			if isGitHubValidationError(err) {
 				found, lookupErr := findMarkerReview(ctx, pr, marker)
 				if lookupErr == nil && found == 0 {
 					return result, fail("draft_rejected", "GitHub rejected the prepared review; reassess before retrying: %v", err)

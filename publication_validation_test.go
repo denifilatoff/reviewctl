@@ -7,6 +7,34 @@ import (
 	"testing"
 )
 
+func TestDraftValidationRequiresDistinctOwnedDiscussions(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	attempt := Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest"}
+	for _, test := range []struct {
+		name    string
+		ids     []string
+		invalid bool
+	}{
+		{"valid owned plan", []string{"PRRT_second", "PRRT_first"}, false},
+		{"foreign thread with equal count", []string{"PRRT_first", "PRRT_foreign"}, true},
+		{"duplicate thread with equal count", []string{"PRRT_first", "PRRT_first"}, true},
+		{"missing owned thread", []string{"PRRT_first"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			draft := ReviewDraft{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number,
+				HeadSHA: "head", SkillDigest: "digest", Verdict: "APPROVE", Body: "Summary.",
+				Comments: []ReviewComment{}, Discussions: []DiscussionAction{}}
+			for _, id := range test.ids {
+				draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: id, Action: "preserved"})
+			}
+			err := validateDraft(draft, attempt, []string{"PRRT_first", "PRRT_second"}, false)
+			if (err != nil) != test.invalid {
+				t.Errorf("validateDraft(%s) = %v, want rejection=%t", test.name, err, test.invalid)
+			}
+		})
+	}
+}
+
 func TestDraftValidationIdentifiesInvalidCommentField(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	attempt := Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest"}

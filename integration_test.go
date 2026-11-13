@@ -1672,12 +1672,40 @@ func helperGH(args []string) {
 		if json.NewDecoder(os.Stdin).Decode(&request) != nil {
 			os.Exit(76)
 		}
+		if os.WriteFile(state+".reply-attempts", []byte(strconv.Itoa(readTestCounter(state+".reply-attempts")+1)), 0o600) != nil {
+			os.Exit(76)
+		}
+		if os.Getenv("REVIEWCTL_FAKE_REJECT_REPLY") != "" {
+			rejectFakeDiscussionReply()
+		}
 		threads := fakeGHThreads()
-		threads[0].Comments = append(threads[0].Comments, githubReviewComment{
-			DatabaseID: 2, Author: "reviewer", ReplyToID: 1, Body: request.Body})
+		parts := strings.Split(args[3], "/")
+		if len(parts) != 8 {
+			os.Exit(76)
+		}
+		parentID, err := strconv.ParseInt(parts[6], 10, 64)
+		if err != nil {
+			os.Exit(76)
+		}
+		target, replyID := -1, int64(1)
+		for i, thread := range threads {
+			if len(thread.Comments) > 0 && thread.Comments[0].DatabaseID == parentID {
+				target = i
+			}
+			for _, comment := range thread.Comments {
+				if comment.DatabaseID >= replyID {
+					replyID = comment.DatabaseID + 1
+				}
+			}
+		}
+		if target < 0 {
+			os.Exit(76)
+		}
+		threads[target].Comments = append(threads[target].Comments, githubReviewComment{
+			DatabaseID: replyID, Author: "reviewer", ReplyToID: parentID, Body: request.Body})
 		if os.Getenv("REVIEWCTL_FAKE_HUMAN_REPLY_AFTER_REPLY") != "" {
-			threads[0].Comments = append(threads[0].Comments, githubReviewComment{
-				DatabaseID: 3, Author: "human", ReplyToID: 1, Body: "This still loses data; do not resolve it."})
+			threads[target].Comments = append(threads[target].Comments, githubReviewComment{
+				DatabaseID: replyID + 1, Author: "human", ReplyToID: parentID, Body: "This still loses data; do not resolve it."})
 		}
 		payload, _ := json.Marshal(threads)
 		if os.WriteFile(state+".threads.json", payload, 0o600) != nil {
@@ -1686,13 +1714,20 @@ func helperGH(args []string) {
 		if os.WriteFile(state+".reply-created", nil, 0o600) != nil {
 			os.Exit(76)
 		}
+		if os.Getenv("REVIEWCTL_FAKE_REJECT_REPLY_AFTER_CREATE") != "" {
+			rejectFakeDiscussionReply()
+		}
 		if os.Getenv("REVIEWCTL_FAKE_LOST_REPLY_RESPONSE") != "" {
 			os.Exit(76)
 		}
-		fmt.Print(`{"id":2}`)
+		json.NewEncoder(os.Stdout).Encode(map[string]int64{"id": replyID})
 		return
 	}
 	if len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/reviews/") && strings.HasSuffix(args[1], "/comments") {
+		if response := os.Getenv("REVIEWCTL_FAKE_COMMENTS_RESPONSE"); response != "" {
+			fmt.Print(response)
+			return
+		}
 		data, err := os.ReadFile(state + ".comments.json")
 		if err != nil {
 			os.Exit(76)
@@ -1703,11 +1738,23 @@ func helperGH(args []string) {
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
 		threads := fakeGHThreads()
 		if len(args) >= 4 && args[2] == "--input" {
-			var request struct{ Query string }
+			var request struct {
+				Query     string
+				Variables map[string]string
+			}
 			if json.NewDecoder(os.Stdin).Decode(&request) != nil || len(threads) == 0 {
 				os.Exit(76)
 			}
-			threads[0].IsResolved = !strings.Contains(request.Query, "unresolveReviewThread")
+			target := -1
+			for i := range threads {
+				if threads[i].ID == request.Variables["id"] {
+					target = i
+				}
+			}
+			if target < 0 {
+				os.Exit(76)
+			}
+			threads[target].IsResolved = !strings.Contains(request.Query, "unresolveReviewThread")
 			data, _ := json.Marshal(threads)
 			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
 				os.Exit(76)
@@ -1736,6 +1783,10 @@ func helperGH(args []string) {
 		}
 		for _, arg := range args {
 			if id, ok := strings.CutPrefix(arg, "id="); ok {
+				if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
+					fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
+					os.Exit(1)
+				}
 				var node any
 				for _, candidate := range nodes {
 					if candidate.(map[string]any)["id"] == id {
@@ -1957,6 +2008,17 @@ func helperGH(args []string) {
 		return
 	}
 	os.Exit(92)
+}
+
+func rejectFakeDiscussionReply() {
+	status := os.Getenv("REVIEWCTL_FAKE_REPLY_STATUS")
+	if status == "" {
+		status = "422"
+	}
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"message": "Validation Failed", "status": status,
+		"errors": []map[string]string{{"resource": "PullRequestReviewComment", "field": "body", "code": "invalid"}}})
+	fmt.Fprintf(os.Stderr, "gh: Validation Failed (HTTP %s)\n", status)
+	os.Exit(1)
 }
 
 func fakeGHThreads() []githubReviewThread {

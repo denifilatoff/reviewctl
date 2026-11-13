@@ -398,3 +398,61 @@ func TestControllerReassessesRejectedDraft(t *testing.T) {
 		t.Fatalf("validation error was not supplied for reassessment: %s, %v", instruction, err)
 	}
 }
+
+func TestControllerKeepsDraftOnInlineReadbackMismatch(t *testing.T) {
+	const original = `{"path":"main.go","line":12,"side":"RIGHT","body":"A finding."}`
+	for _, test := range []struct {
+		name string
+		wire string
+	}{
+		{"missing", `[[]]`},
+		{"changed", `[[{"path":"main.go","line":12,"side":"RIGHT","body":"Edited finding."}]]`},
+		{"extra", `[[` + original + `,{"path":"other.go","line":1,"side":"LEFT","body":"Extra finding."}]]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, pr, store, temp := publicationFixture(t)
+			t.Setenv("REVIEWCTL_FAKE_INLINE_COMMENT", "1")
+			t.Setenv("REVIEWCTL_FAKE_COMMENTS_RESPONSE", test.wire)
+			ctx := context.Background()
+			if _, err := store.EnqueueMany(ctx, []PullRequest{pr}); err != nil {
+				t.Fatal(err)
+			}
+			first := ProcessAttempt(ctx, cfg, store, pr)
+			if first.Success || first.ErrorCode != "publication_failed" {
+				t.Errorf("ProcessAttempt(%s inline readback) = %+v, want publication failure", test.name, first)
+			}
+			if err := store.Finish(ctx, first); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := store.pendingPublication(ctx, pr)
+			if err != nil || pending == nil || len(pending.Draft.Comments) != 1 {
+				t.Fatalf("pending after %s readback = %+v, %v; want original draft retained", test.name, pending, err)
+			}
+			t.Setenv("REVIEWCTL_FAKE_COMMENTS_RESPONSE", "")
+			second := ProcessAttempt(ctx, cfg, store, pr)
+			if !second.Success || !second.Recovered || second.Cost != nil {
+				t.Errorf("retry corrected inline readback = %+v, want recovered success without duplicate cost", second)
+			}
+			if err := store.Finish(ctx, second); err != nil {
+				t.Fatal(err)
+			}
+			calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
+			if string(calls) != "1" || readTestCounter(filepath.Join(temp, "published.posts")) != 1 {
+				t.Errorf("inline recovery analysis=%q, review posts=%d; want 1 each", calls, readTestCounter(filepath.Join(temp, "published.posts")))
+			}
+		})
+	}
+}
+
+func TestPublishedCommentsAcceptOriginalLocations(t *testing.T) {
+	_, pr, _, temp := publicationFixture(t)
+	wire := `[[{"path":"main.go","line":null,"original_line":12,"side":"RIGHT",` +
+		`"start_line":null,"original_start_line":10,"start_side":"RIGHT","body":"A finding."}]]`
+	if err := os.WriteFile(filepath.Join(temp, "published.comments.json"), []byte(wire), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected := []ReviewComment{{Path: "main.go", Line: 12, Side: "RIGHT", StartLine: 10, StartSide: "RIGHT", Body: "A finding."}}
+	if err := verifyPublishedComments(context.Background(), pr, 123, expected); err != nil {
+		t.Errorf("verifyPublishedComments(original line range) = %v, want no error", err)
+	}
+}

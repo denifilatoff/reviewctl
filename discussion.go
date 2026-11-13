@@ -83,6 +83,18 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 				}
 				if err := githubJSON(ctx, []string{"--method", "POST", endpoint},
 					map[string]string{"body": discussionReplyBody(publication, action)}, &reply); err != nil {
+					if isGitHubValidationError(err) {
+						after, lookupErr := readGitHubReviewThread(ctx, action.ThreadID)
+						if lookupErr == nil {
+							_, created, inspectErr := inspectPublicationDiscussion(publication, action, before, after)
+							if inspectErr != nil {
+								return inspectErr
+							}
+							if created == 0 {
+								return fail("draft_rejected", "GitHub rejected the reply for discussion %s; reassess before retrying: %v", action.ThreadID, err)
+							}
+						}
+					}
 					return err
 				}
 				replyID = reply.ID
