@@ -3,9 +3,51 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestReadDraftAcceptsLiteralPublicationContract(t *testing.T) {
+	wire := `{
+  "provider": "github",
+  "repository": "acme/service",
+  "number": 7,
+  "head_sha": "head",
+  "skill_digest": "digest",
+  "verdict": "REQUEST_CHANGES",
+  "body": "Result: REQUEST_CHANGES (1 blocking, 0 non-blocking)\nRevision: head",
+  "comments": [{
+    "path": "main.go", "line": 12, "side": "RIGHT",
+    "start_line": 10, "start_side": "RIGHT", "body": "Independent finding."
+  }],
+  "discussions": [{
+    "thread_id": "PRRT_owned", "action": "open_with_reply", "body": "The original finding still applies."
+  }],
+  "new_findings": true
+}`
+	file := filepath.Join(t.TempDir(), "draft.json")
+	if err := os.WriteFile(file, []byte(wire), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := readDraft(file)
+	if err != nil {
+		t.Fatalf("readDraft(literal publication contract): %v", err)
+	}
+	want := ReviewDraft{Provider: "github", Repository: "acme/service", Number: 7, HeadSHA: "head",
+		SkillDigest: "digest", Verdict: "REQUEST_CHANGES",
+		Body:        "Result: REQUEST_CHANGES (1 blocking, 0 non-blocking)\nRevision: head",
+		Comments:    []ReviewComment{{Path: "main.go", Line: 12, Side: "RIGHT", StartLine: 10, StartSide: "RIGHT", Body: "Independent finding."}},
+		Discussions: []DiscussionAction{{ThreadID: "PRRT_owned", Action: "open_with_reply", Body: "The original finding still applies."}},
+		NewFindings: true}
+	if !reflect.DeepEqual(draft, want) {
+		t.Errorf("readDraft(literal publication contract) = %+v, want %+v", draft, want)
+	}
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	if err := validateDraft(draft, Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest"}, []string{"PRRT_owned"}, false); err != nil {
+		t.Errorf("validateDraft(literal publication contract): %v", err)
+	}
+}
 
 func TestDraftValidationRequiresDistinctOwnedDiscussions(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
