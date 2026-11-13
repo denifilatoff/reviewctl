@@ -47,15 +47,21 @@ func TestControllerPublishesSignedDraft(t *testing.T) {
 	}
 	data, err := os.ReadFile(filepath.Join(temp, "published.request.json"))
 	var request struct {
-		Body     string          `json:"body"`
-		Commit   string          `json:"commit_id"`
-		Comments []ReviewComment `json:"comments"`
+		Body     string `json:"body"`
+		Commit   string `json:"commit_id"`
+		Comments []struct {
+			Path string `json:"path"`
+			Line int    `json:"line"`
+			Side string `json:"side"`
+			Body string `json:"body"`
+		} `json:"comments"`
 	}
 	if err != nil || json.Unmarshal(data, &request) != nil || request.Commit != result.HeadSHA ||
 		!strings.HasSuffix(request.Body, "\n\n<sub>🤖 gpt-test high</sub>") {
 		t.Fatalf("initial controller POST = %s, %v", data, err)
 	}
-	if len(request.Comments) != 1 || request.Comments[0].Path != "main.go" || request.Comments[0].Line != 12 {
+	if len(request.Comments) != 1 || request.Comments[0].Path != "main.go" || request.Comments[0].Line != 12 ||
+		request.Comments[0].Side != "RIGHT" || request.Comments[0].Body != "A finding." {
 		t.Fatalf("inline findings = %+v", request.Comments)
 	}
 }

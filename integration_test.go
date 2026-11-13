@@ -1675,8 +1675,15 @@ func helperGH(args []string) {
 		threads := fakeGHThreads()
 		threads[0].Comments = append(threads[0].Comments, githubReviewComment{
 			DatabaseID: 2, Author: "reviewer", ReplyToID: 1, Body: request.Body})
+		if os.Getenv("REVIEWCTL_FAKE_HUMAN_REPLY_AFTER_REPLY") != "" {
+			threads[0].Comments = append(threads[0].Comments, githubReviewComment{
+				DatabaseID: 3, Author: "human", ReplyToID: 1, Body: "This still loses data; do not resolve it."})
+		}
 		payload, _ := json.Marshal(threads)
 		if os.WriteFile(state+".threads.json", payload, 0o600) != nil {
+			os.Exit(76)
+		}
+		if os.WriteFile(state+".reply-created", nil, 0o600) != nil {
 			os.Exit(76)
 		}
 		if os.Getenv("REVIEWCTL_FAKE_LOST_REPLY_RESPONSE") != "" {
@@ -1726,6 +1733,23 @@ func helperGH(args []string) {
 					"pageInfo": map[string]bool{"hasNextPage": false},
 				},
 			})
+		}
+		for _, arg := range args {
+			if id, ok := strings.CutPrefix(arg, "id="); ok {
+				var node any
+				for _, candidate := range nodes {
+					if candidate.(map[string]any)["id"] == id {
+						node = candidate
+					}
+				}
+				json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
+				return
+			}
+		}
+		if count := os.Getenv("REVIEWCTL_FAKE_THREAD_READS"); count != "" {
+			if os.WriteFile(count, []byte(strconv.Itoa(readTestCounter(count)+1)), 0o600) != nil {
+				os.Exit(76)
+			}
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
@@ -1891,6 +1915,11 @@ func helperGH(args []string) {
 		number := int64(7)
 		author := "dependabot[bot]"
 		head := "0123456789abcdef0123456789abcdef01234567"
+		if os.Getenv("REVIEWCTL_FAKE_HEAD_AFTER_REPLY") != "" {
+			if _, err := os.Stat(os.Getenv("REVIEWCTL_FAKE_STATE") + ".reply-created"); err == nil {
+				head = "fedcba9876543210fedcba9876543210fedcba98"
+			}
+		}
 		if os.Getenv("REVIEWCTL_FAKE_HEAD_AFTER_POST") != "" {
 			if _, err := os.Stat(os.Getenv("REVIEWCTL_FAKE_STATE")); err == nil {
 				head = "fedcba9876543210fedcba9876543210fedcba98"
@@ -2112,7 +2141,13 @@ func helperCodex(args []string) {
 		if strings.HasSuffix(action, "_with_reply") {
 			body = "Verified the updated implementation."
 		}
-		draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: "PRRT_owned", Action: action, Body: body})
+		var owned []string
+		if json.Unmarshal([]byte(fields["Pre-existing owned discussion thread IDs"]), &owned) != nil {
+			os.Exit(95)
+		}
+		for _, id := range owned {
+			draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: id, Action: action, Body: body})
+		}
 	}
 	if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
 		draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: "A finding."})
@@ -2121,6 +2156,13 @@ func helperCodex(args []string) {
 		draft.HeadSHA = head
 	}
 	data, _ := json.Marshal(draft)
+	if os.Getenv("REVIEWCTL_FAKE_GENERAL_FINDING") != "" {
+		var wire map[string]any
+		_ = json.Unmarshal(data, &wire)
+		wire["new_findings"] = true
+		wire["body"] = "A new general finding outside the diff."
+		data, _ = json.Marshal(wire)
+	}
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
 	}

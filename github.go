@@ -52,7 +52,29 @@ type githubReviewThread struct {
 	Comments   []githubReviewComment
 }
 
-const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}`
+type githubReviewThreadWire struct {
+	ID         string `json:"id"`
+	IsResolved bool   `json:"isResolved"`
+	Comments   struct {
+		Nodes []struct {
+			DatabaseID int64  `json:"databaseId"`
+			Body       string `json:"body"`
+			Author     struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			ReplyTo *struct {
+				DatabaseID int64 `json:"databaseId"`
+			} `json:"replyTo"`
+		} `json:"nodes"`
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+	} `json:"comments"`
+}
+
+const reviewThreadFields = `id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}`
+const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{` + reviewThreadFields + `} pageInfo{hasNextPage}}}}}`
+const reviewThreadQuery = `query($id:ID!){node(id:$id){... on PullRequestReviewThread{` + reviewThreadFields + `}}}`
 
 func listGitHubReviewThreads(ctx context.Context, pr PullRequest) ([]githubReviewThread, error) {
 	owner, name, ok := strings.Cut(pr.Repository, "/")
@@ -88,25 +110,7 @@ func decodeGitHubReviewThreads(data []byte) ([]githubReviewThread, error) {
 			Repository *struct {
 				PullRequest *struct {
 					ReviewThreads struct {
-						Nodes []struct {
-							ID         string `json:"id"`
-							IsResolved bool   `json:"isResolved"`
-							Comments   struct {
-								Nodes []struct {
-									DatabaseID int64  `json:"databaseId"`
-									Body       string `json:"body"`
-									Author     struct {
-										Login string `json:"login"`
-									} `json:"author"`
-									ReplyTo *struct {
-										DatabaseID int64 `json:"databaseId"`
-									} `json:"replyTo"`
-								} `json:"nodes"`
-								PageInfo struct {
-									HasNextPage bool `json:"hasNextPage"`
-								} `json:"pageInfo"`
-							} `json:"comments"`
-						} `json:"nodes"`
+						Nodes    []githubReviewThreadWire `json:"nodes"`
 						PageInfo struct {
 							HasNextPage bool `json:"hasNextPage"`
 						} `json:"pageInfo"`
@@ -133,21 +137,51 @@ func decodeGitHubReviewThreads(data []byte) ([]githubReviewThread, error) {
 	}
 	threads := make([]githubReviewThread, len(wire.Nodes))
 	for i, item := range wire.Nodes {
-		if item.ID == "" || item.Comments.PageInfo.HasNextPage || len(item.Comments.Nodes) == 0 {
-			return nil, fmt.Errorf("GitHub returned an incomplete review thread")
+		thread, err := decodeGitHubReviewThread(item)
+		if err != nil {
+			return nil, err
 		}
-		threads[i] = githubReviewThread{ID: item.ID, IsResolved: item.IsResolved}
-		for _, comment := range item.Comments.Nodes {
-			replyTo := int64(0)
-			if comment.ReplyTo != nil {
-				replyTo = comment.ReplyTo.DatabaseID
-			}
-			threads[i].Comments = append(threads[i].Comments, githubReviewComment{
-				DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
-			})
-		}
+		threads[i] = thread
 	}
 	return threads, nil
+}
+
+func decodeGitHubReviewThread(item githubReviewThreadWire) (githubReviewThread, error) {
+	if item.ID == "" || item.Comments.PageInfo.HasNextPage || len(item.Comments.Nodes) == 0 {
+		return githubReviewThread{}, fmt.Errorf("GitHub returned an incomplete review thread")
+	}
+	thread := githubReviewThread{ID: item.ID, IsResolved: item.IsResolved}
+	for _, comment := range item.Comments.Nodes {
+		replyTo := int64(0)
+		if comment.ReplyTo != nil {
+			replyTo = comment.ReplyTo.DatabaseID
+		}
+		thread.Comments = append(thread.Comments, githubReviewComment{
+			DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
+		})
+	}
+	return thread, nil
+}
+
+func readGitHubReviewThread(ctx context.Context, id string) (githubReviewThread, error) {
+	var response struct {
+		Data   struct{ Node *githubReviewThreadWire }
+		Errors []struct{ Message string }
+	}
+	if err := githubJSON(ctx, []string{"graphql", "-f", "query=" + reviewThreadQuery, "-f", "id=" + id}, nil, &response); err != nil {
+		return githubReviewThread{}, fail("github_failed", "read review thread %s: %v", id, err)
+	}
+	if len(response.Errors) != 0 {
+		return githubReviewThread{}, fail("github_failed", "read review thread %s: %s", id, response.Errors[0].Message)
+	}
+	if response.Data.Node == nil {
+		return githubReviewThread{}, fail("discussion_changed", "review thread %s is unavailable; reassess before writing", id)
+	}
+	thread, err := decodeGitHubReviewThread(*response.Data.Node)
+	if err != nil || thread.ID != id {
+		return githubReviewThread{}, fail("github_failed", "GitHub returned an incomplete or mismatched review thread %s", id)
+	}
+	return thread, nil
 }
 
 func validateDiscussionOutcomes(initial, current []githubReviewThread, login string, outcomes []DiscussionOutcome) error {

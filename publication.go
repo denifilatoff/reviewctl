@@ -24,6 +24,7 @@ type ReviewDraft struct {
 	Body        string             `json:"body"`
 	Comments    []ReviewComment    `json:"comments"`
 	Discussions []DiscussionAction `json:"discussions"`
+	NewFindings bool               `json:"new_findings,omitempty"`
 }
 
 type ReviewComment struct {
@@ -86,13 +87,27 @@ func validateDraft(draft ReviewDraft, attempt Attempt, owned []string, selfAutho
 		draft.Comments == nil || draft.Discussions == nil {
 		return fmt.Errorf("review draft requires body, comments, and discussions without controller markers")
 	}
-	for _, comment := range draft.Comments {
-		if comment.Path == "" || path.IsAbs(comment.Path) || path.Clean(comment.Path) != comment.Path ||
-			comment.Path == ".." || strings.HasPrefix(comment.Path, "../") || strings.Contains(comment.Path, "\\") ||
-			comment.Line <= 0 || comment.Side != "LEFT" && comment.Side != "RIGHT" || strings.TrimSpace(comment.Body) == "" ||
-			comment.StartLine < 0 || comment.StartLine > comment.Line ||
-			comment.StartLine == 0 && comment.StartSide != "" || comment.StartLine > 0 && comment.StartSide != comment.Side {
-			return fmt.Errorf("review draft contains an invalid inline comment")
+	for index, comment := range draft.Comments {
+		field, constraint := "", ""
+		switch {
+		case comment.Path == "" || path.IsAbs(comment.Path) || path.Clean(comment.Path) != comment.Path ||
+			comment.Path == ".." || strings.HasPrefix(comment.Path, "../") || strings.Contains(comment.Path, "\\"):
+			field, constraint = "path", "must be a clean repository-relative file path"
+		case comment.Line <= 0:
+			field, constraint = "line", "must be positive"
+		case comment.Side != "LEFT" && comment.Side != "RIGHT":
+			field, constraint = "side", "must be LEFT or RIGHT"
+		case strings.TrimSpace(comment.Body) == "":
+			field, constraint = "body", "must not be empty"
+		case comment.StartLine < 0 || comment.StartLine > comment.Line:
+			field, constraint = "start_line", "must be zero or a positive line no greater than line"
+		case comment.StartLine == 0 && comment.StartSide != "":
+			field, constraint = "start_side", "must be omitted when start_line is zero"
+		case comment.StartLine > 0 && comment.StartSide != comment.Side:
+			field, constraint = "start_side", "must match side for a line range"
+		}
+		if field != "" {
+			return fmt.Errorf("inline comment %d (%q:%d): %s %s", index+1, bounded(comment.Path, 128), comment.Line, field, constraint)
 		}
 	}
 	if len(draft.Discussions) != len(owned) {
@@ -180,9 +195,47 @@ func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, di
 	return review, nil
 }
 
+func resolvePublicationTarget(ctx context.Context, cfg Config, pr PullRequest, head string) (GitHubPullRequest, error) {
+	current, err := resolveGitHub(ctx, pr)
+	if err != nil {
+		return current, err
+	}
+	if err := ValidateGitHubPullRequest(cfg, pr, current); err != nil {
+		return current, err
+	}
+	if current.HeadSHA != head {
+		return current, fail("head_changed", "pull request head changed; reassess the current revision")
+	}
+	return current, nil
+}
+
+func validatePublicationSnapshot(initial, current []githubReviewThread) error {
+	if len(initial) != len(current) {
+		return fail("discussion_changed", "review discussions changed; reassess before publishing")
+	}
+	for _, before := range initial {
+		found := false
+		for _, after := range current {
+			if before.ID == after.ID {
+				found = before.IsResolved == after.IsResolved && len(before.Comments) == len(after.Comments) &&
+					commentsPreserved(before.Comments, after.Comments)
+				break
+			}
+		}
+		if !found {
+			return fail("discussion_changed", "review discussion %s changed; reassess before publishing", before.ID)
+		}
+	}
+	return nil
+}
+
 func deliverPublication(ctx context.Context, cfg Config, publication Publication) (Attempt, error) {
 	result := publication.Attempt
 	pr := result.PullRequest
+	current, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA)
+	if err != nil {
+		return result, err
+	}
 	login, err := resolveGitHubLogin(ctx)
 	if err != nil {
 		return result, err
@@ -199,16 +252,16 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	if publication.ExistingReviewID != 0 && id != publication.ExistingReviewID {
 		return result, fmt.Errorf("saved review is missing or its marker changed")
 	}
-	current, err := resolveGitHub(ctx, pr)
-	if err != nil {
-		return result, err
-	}
-	if err := ValidateGitHubPullRequest(cfg, pr, current); err != nil {
-		return result, err
-	}
 	if id == 0 {
-		if current.HeadSHA != result.HeadSHA {
-			return result, fail("head_changed", "pull request head changed before review publication")
+		threads, err := listGitHubReviewThreads(ctx, pr)
+		if err != nil {
+			return result, err
+		}
+		if err := validatePublicationSnapshot(publication.Threads, threads); err != nil {
+			return result, err
+		}
+		if _, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA); err != nil {
+			return result, err
 		}
 		var review submittedReview
 		request := map[string]any{"commit_id": result.HeadSHA, "event": publication.Draft.Verdict,
@@ -243,15 +296,15 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	}
 	result.ReviewID, result.ReviewURL = strconv.FormatInt(id, 10), review.URL
 	result.Verdict = map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
-	if result.Verdict != publication.Draft.Verdict {
-		return result, fmt.Errorf("published review event differs from the saved publication")
-	}
-	current, err = resolveGitHub(ctx, pr)
-	if err != nil {
+	if _, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA); err != nil {
 		return result, err
 	}
-	if current.HeadSHA != result.HeadSHA {
-		return result, fail("head_changed", "pull request head changed after review publication")
+	if publication.ExistingReviewID != 0 && (publication.Draft.NewFindings || len(publication.Draft.Comments) != 0 ||
+		result.Verdict != publication.Draft.Verdict) {
+		return result, fail("review_conflict", "reassessment conflicts with published review %s; its draft is retained for operator assessment", review.URL)
+	}
+	if result.Verdict != publication.Draft.Verdict {
+		return result, fmt.Errorf("published review event differs from the saved publication")
 	}
 	if publication.ExistingReviewID == 0 {
 		if review.Body != publication.Draft.Body {
@@ -261,7 +314,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 			return result, err
 		}
 	}
-	if err := syncPublicationDiscussions(ctx, publication); err != nil {
+	if err := syncPublicationDiscussions(ctx, cfg, publication); err != nil {
 		return result, err
 	}
 	current, err = resolveGitHub(ctx, pr)

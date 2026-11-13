@@ -251,6 +251,11 @@ A saved publication resumes before another Codex invocation. An existing marked 
 its author, commit, URL, and submitted event. Owned discussions can be reassessed by Codex when another delivery
 attempt has no saved plan.
 
+A reassessment retains its own draft. If it reports independent new findings or changes the verdict of an existing
+review, `review_conflict` preserves that draft and keeps the PR queued for operator assessment. Inline comments always
+count as new findings on this path; the optional draft field `new_findings` also identifies general findings in the
+summary and defaults to false for older saved drafts. Recovery does not replace a new assessment with an old approval.
+
 `APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
 valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
 These outcomes are not process failures.
@@ -280,6 +285,11 @@ pre-existing comments remain intact. Each reply contains a marker tied to the pr
 recovers that reply before attempting another write. Resolve and reopen operations follow the proposed action and are
 verified against the complete discussion snapshot. `discussion_changed` keeps the PR queued for reassessment when
 human comments or state changes invalidate a saved action.
+
+Before posting a new review, ReviewCTL validates the discussion snapshot used for its assessment. Discussion writes
+use fresh reads of the affected thread and current head. After posting a reply, the controller reads it back and
+checks for intervening human activity before resolving or reopening. Preserved actions share full snapshot reads;
+mutating actions read only their own thread before writing, with a full final readback of all outcomes.
 
 The controller resolves the authenticated GitHub login directly through `gh`. For a self-authored PR it submits
 `COMMENT` while retaining the assessment in the review body. Other PRs receive `APPROVE` or `REQUEST_CHANGES`.

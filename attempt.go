@@ -182,9 +182,13 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	}
 
 	if existingReviewID != 0 && len(ownedIDs) == 0 {
-		review, err := readPublishedReview(ctx, pr, existingReviewID, result.HeadSHA, digest, authenticatedLogin, selfAuthored)
-		if err != nil {
+		review, reviewErr := readPublishedReview(ctx, pr, existingReviewID, result.HeadSHA, digest, authenticatedLogin, selfAuthored)
+		if _, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA); err != nil {
 			setPublicationError(&result, err)
+			return result
+		}
+		if reviewErr != nil {
+			setPublicationError(&result, reviewErr)
 			return result
 		}
 		result.Success, result.Recovered = true, true
@@ -244,16 +248,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	if selfAuthored {
 		draft.Verdict = "COMMENT"
 	}
-	if existingReviewID != 0 {
-		review, err := readPublishedReview(ctx, pr, existingReviewID, result.HeadSHA, digest, authenticatedLogin, selfAuthored)
-		if err != nil {
-			setPublicationError(&result, err)
-			return result
-		}
-		draft.Body = review.Body
-		draft.Verdict = map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
-		draft.Comments = []ReviewComment{}
-	} else {
+	if existingReviewID == 0 {
 		draft.Body = strings.TrimRight(draft.Body, "\r\n") + "\n\n" + reviewMarker(pr, result.HeadSHA, digest)
 		if result.Cost != nil {
 			if signature := result.Cost.githubSignature(roundedTokenCount); signature != "" {
@@ -416,7 +411,9 @@ Reassess every listed owned discussion using the installed skill, and propose ex
 Actions are preserved, resolved, resolved_with_reply, or open_with_reply. For actions with a reply, include body.
 For other actions omit body. Do not propose actions on other users' threads.
 Return exactly one JSON object with provider, repository, number, head_sha, skill_digest, verdict, body, comments,
-and discussions. Verdict is APPROVE or REQUEST_CHANGES. The controller handles the self-authored COMMENT event.
+discussions, and new_findings. Set new_findings to true for independent new findings, including general findings in
+body outside the diff. Existing findings belong in discussion actions, not new inline comments.
+Verdict is APPROVE or REQUEST_CHANGES. The controller handles the self-authored COMMENT event.
 Body is the review summary. Comments is an array of inline findings with path, line, side (LEFT or RIGHT), and body.
 For a line range include start_line and start_side on the same side as line. Discussions is an array of objects
 with thread_id, action, and optional body. Include comments and discussions as empty arrays when there are none.

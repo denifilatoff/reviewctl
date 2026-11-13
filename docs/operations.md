@@ -104,6 +104,22 @@ retires that draft and supplies the validation error to the next Codex attempt s
 `review_dismissed` reports that GitHub dismissed the marked review for the current head. Inspect its dismissal reason
 on GitHub. A newer PR head is assessed independently.
 
+`review_conflict` means a reassessment produced new findings or a different verdict for a head that already has a
+published review. The new draft and accounting remain saved; ReviewCTL keeps the PR queued and reports the existing
+review URL. Repeated runs retain the conflict without invoking Codex or recording its original usage again.
+
+Inspect the existing review and export the retained draft for manual assessment. For example, with SQLite's CLI:
+
+```sh
+sqlite3 -readonly "${XDG_STATE_HOME:-$HOME/.local/state}/reviewctl/reviewctl.db" \
+  "SELECT json_extract(payload, '$.Draft') FROM review_publications \
+   WHERE provider = 'github' AND repository = 'owner/repository' AND change_number = 123;"
+```
+
+Replace the repository and PR number with the reported target. Complete the assessment on GitHub as appropriate.
+Automatic processing of this PR resumes when its head changes; other queued PRs continue normally. A new head retires
+the obsolete draft after recording its accounting. Do not remove the saved publication to bypass this check.
+
 ReviewCTL checks the current head before sending a new review. `head_changed` leaves the PR queued for its new revision.
 If the head changes just after the check, GitHub attaches the review to the explicit commit, and the final check keeps
 the PR queued. The submitted review already contains its accounting signature.
@@ -111,6 +127,10 @@ the PR queued. The submitted review already contains its accounting signature.
 Review and reply markers let a retry recover a successful request whose response was lost. `discussion_changed`
 retains the PR for reassessment when a human reply or state change invalidates a saved discussion action. Check the
 reported PR in GitHub, then allow the next scheduled `run` to reassess it.
+
+Discussion snapshots are checked before a new review is submitted. Before each discussion write, ReviewCTL rechecks
+the pinned head and the affected thread. It reads a posted reply back before changing the thread's resolution, so
+new human replies require reassessment rather than closure based on an older conversation.
 
 Prepared publications in SQLite contain the review text, inline findings, and proposed replies until delivery completes.
 Existing pending signature deliveries are retried separately. `signature_pending` returns exit code `1` until such

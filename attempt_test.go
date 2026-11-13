@@ -44,6 +44,7 @@ func TestTrustedInstructionRequestsOwnedDiscussionPlan(t *testing.T) {
 		"The controller owns GitHub publication",
 		"Publish: false",
 		"Keep that SHA even if the pull request changes",
+		"new_findings",
 	} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("trusted instruction does not contain %q", required)
