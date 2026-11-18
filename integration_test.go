@@ -952,7 +952,7 @@ repositories:
 		"XDG_CONFIG_HOME="+configHome,
 		"XDG_STATE_HOME="+stateHome,
 		"REVIEWCTL_FAKE_STATE="+filepath.Join(temp, "published"),
-		"REVIEWCTL_EXPECT_REVIEW_GRADE=low",
+		"REVIEWCTL_EXPECT_REVIEW_GRADE=full",
 		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
 	)
 
@@ -1251,14 +1251,18 @@ func writeDiscoverySnapshots(t *testing.T, dir, repository string, snapshot []fa
 	writeDiscoveryFixture(t, dir, repository, string(data))
 }
 
-func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
+func TestProcessAttemptValidatesVerdictBeforePublishing(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		login     string
-		wantError string
+		name        string
+		login       string
+		verdict     string
+		wantError   string
+		wantMessage string
 	}{
-		{name: "self-authored", login: "dependabot[bot]"},
-		{name: "ordinary", login: "reviewer", wantError: "receipt_invalid"},
+		{name: "self-authored", login: "dependabot[bot]", verdict: "COMMENT"},
+		{name: "ordinary", login: "reviewer", verdict: "COMMENT", wantError: "receipt_invalid"},
+		{name: "incomplete, self-authored", login: "dependabot[bot]", verdict: "REVIEW_INCOMPLETE",
+			wantError: "receipt_invalid", wantMessage: "review incomplete: Review findings"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			temp := t.TempDir()
@@ -1268,7 +1272,7 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 			t.Setenv("REVIEWCTL_FAKE_STATE", filepath.Join(temp, "published"))
 			t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
 			t.Setenv("REVIEWCTL_FAKE_LOGIN", test.login)
-			t.Setenv("REVIEWCTL_FAKE_VERDICT", "COMMENT")
+			t.Setenv("REVIEWCTL_FAKE_VERDICT", test.verdict)
 
 			pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 			cfg := Config{
@@ -1285,8 +1289,9 @@ func TestProcessAttemptBindsCommentToAuthenticatedLogin(t *testing.T) {
 				pending != map[bool]int{true: 1, false: 0}[test.wantError == ""] {
 				t.Fatalf("durable publication before Finish: pending=%d err=%v", pending, err)
 			}
-			if test.wantError != "" && (result.Success || result.ErrorCode != test.wantError) {
-				t.Fatalf("ordinary COMMENT result: %+v", result)
+			if test.wantError != "" && (result.Success || result.ErrorCode != test.wantError ||
+				!strings.Contains(result.ErrorMessage, test.wantMessage)) {
+				t.Fatalf("unexpected review result: %+v", result)
 			}
 		})
 	}
@@ -1858,7 +1863,7 @@ func helperGH(args []string) {
 	rawTarget := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
 	rawView := rawTarget == "view" && len(args) == 5 && args[0] == "pr" && args[1] == "view" &&
 		args[2] == "https://github.com/acme/service/pull/7" &&
-		args[3] == "--json" && args[4] == "url,number,state,isDraft,headRefOid,author,additions,deletions"
+		args[3] == "--json" && args[4] == "url,number,state,isDraft,headRefOid,author"
 	rawLogin := rawTarget == "login" && len(args) == 4 && args[0] == "api" && args[1] == "user" &&
 		args[2] == "--jq" && args[3] == ".login"
 	if rawView || rawLogin {
@@ -2001,7 +2006,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"url": args[2], "number": number, "state": state, "isDraft": os.Getenv("REVIEWCTL_FAKE_PR_DRAFT") != "",
-			"headRefOid": head, "author": map[string]string{"login": author}, "additions": 500, "deletions": 499,
+			"headRefOid": head, "author": map[string]string{"login": author},
 		})
 		return
 	}
@@ -2104,8 +2109,9 @@ func helperCodex(args []string) {
 		return
 	}
 	if want := os.Getenv("REVIEWCTL_EXPECT_REVIEW_GRADE"); want != "" {
-		if !slices.Contains(args, `model_reasoning_effort="high"`) || !slices.Contains(args, "gpt-6.2-sol") {
-			fmt.Fprintln(os.Stderr, "unexpected Codex reasoning effort:", args)
+		if !slices.Contains(args, `model_reasoning_effort="high"`) || !slices.Contains(args, "gpt-6.2-sol") ||
+			!slices.Contains(args, "agents.max_threads=20") {
+			fmt.Fprintln(os.Stderr, "unexpected Codex launch arguments:", args)
 			os.Exit(2)
 		}
 		skill, err := os.ReadFile(".agents/skills/reviewctl-grade/SKILL.md")
@@ -2192,7 +2198,7 @@ func helperCodex(args []string) {
 	}
 	instruction, _ := io.ReadAll(os.Stdin)
 	if want := os.Getenv("REVIEWCTL_EXPECT_REVIEW_GRADE"); want != "" &&
-		!strings.Contains(string(instruction), "Selected review grade: "+want+".") {
+		!strings.Contains(string(instruction), "in "+want+" grade.") {
 		fmt.Fprintln(os.Stderr, "unexpected review grade in Codex instruction")
 		os.Exit(2)
 	}

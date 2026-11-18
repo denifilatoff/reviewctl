@@ -52,11 +52,11 @@ GitHub logins may reach Codex.
 
 ## Model and review cost
 
-ReviewCTL runs reviews with `gpt-6.2-sol` and `high` reasoning effort. It selects the review grade from the total
-number of added and deleted lines reported by GitHub. Below 1,000 lines, the `low` grade uses two subagents. From
-1,000 lines upward, the `medium` grade uses five to seven subagents. If GitHub does not provide valid line counts,
-the attempt ends before launching Codex. Legacy `model` and `reasoning_effort` keys remain accepted for compatibility
-and have no effect on review launches. History records the requested model and effort and the values from session logs.
+ReviewCTL runs every review with `gpt-6.2-sol`, `high` reasoning effort, and the `full` grade. The locked skill assigns
+one native subagent per applicable review axis and uses separate measurement and verification subagents as needed.
+When the skill reports a material coverage gap, the attempt fails with `receipt_invalid` and stays queued.
+Legacy `model` and `reasoning_effort` keys remain accepted for compatibility and have no effect on review launches.
+History records the requested model and effort and the values from session logs.
 
 Install [ccusage](https://ccusage.com/guide/) version 20.0.19 or newer within 20.x and put it on the same `PATH` as
 `reviewctl`. Cost estimation uses `ccusage codex session --json --no-offline`, with only the review's session logs
