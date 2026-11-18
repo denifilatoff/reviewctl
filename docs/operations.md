@@ -33,8 +33,6 @@ publishing reviews.
 
 ```yaml
 harness: codex
-model: gpt-6-astra
-reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 
@@ -54,16 +52,11 @@ GitHub logins may reach Codex.
 
 ## Model and review cost
 
-Set the review model and reasoning effort with these settings:
-
-```yaml
-model: gpt-6-astra
-reasoning_effort: low
-```
-
-ReviewCTL defaults to `gpt-6-astra` and `low` when either setting is omitted. Codex validates whether a selected model
-supports the configured effort. History records both the requested settings and the model and effort observed in the
-session logs.
+ReviewCTL runs reviews with `gpt-6.2-sol` and `high` reasoning effort. It selects the review grade from the total
+number of added and deleted lines reported by GitHub. Below 1,000 lines, the `low` grade uses two subagents. From
+1,000 lines upward, the `medium` grade uses five to seven subagents. If GitHub does not provide valid line counts,
+the attempt ends before launching Codex. Legacy `model` and `reasoning_effort` keys remain accepted for compatibility
+and have no effect on review launches. History records the requested model and effort and the values from session logs.
 
 Install [ccusage](https://ccusage.com/guide/) version 20.0.19 or newer within 20.x and put it on the same `PATH` as
 `reviewctl`. Cost estimation uses `ccusage codex session --json --no-offline`, with only the review's session logs
@@ -74,7 +67,7 @@ accounting copies are removed after calculation. Do not remove active logs befor
 After the model finishes, the controller includes a signature as the last line of the initial GitHub review body:
 
 ```markdown
-<sub>🤖 gpt-6-astra low in=12k cached=40k out=3k usd=0.083</sub>
+<sub>🤖 gpt-6.2-sol high in=12k cached=40k out=3k usd=0.083</sub>
 ```
 
 The primary session supplies the model and reasoning effort. The token counts and estimated cost cover the review

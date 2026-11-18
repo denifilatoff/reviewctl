@@ -94,8 +94,6 @@ func statePath() (string, error) {
 func cachePath() (string, error) { return defaultPath("XDG_CACHE_HOME", ".cache", "") }
 
 const initialConfig = `harness: codex
-model: gpt-6-astra
-reasoning_effort: low
 publish: false
 attempt_timeout: 1h
 trusted_authors: []

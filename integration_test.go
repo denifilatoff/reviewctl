@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -933,6 +934,8 @@ func TestFullProcessReviewAndRunCycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := `harness: codex
+model: gpt-6.1-sol
+reasoning_effort: xhigh
 publish: true
 trusted_authors: ["dependabot[bot]"]
 repositories:
@@ -949,6 +952,7 @@ repositories:
 		"XDG_CONFIG_HOME="+configHome,
 		"XDG_STATE_HOME="+stateHome,
 		"REVIEWCTL_FAKE_STATE="+filepath.Join(temp, "published"),
+		"REVIEWCTL_EXPECT_REVIEW_GRADE=low",
 		"REVIEWCTL_FAKE_GIT_STATE="+filepath.Join(temp, "git-fetch"),
 	)
 
@@ -1854,7 +1858,7 @@ func helperGH(args []string) {
 	rawTarget := os.Getenv("REVIEWCTL_FAKE_RAW_GITHUB_TARGET")
 	rawView := rawTarget == "view" && len(args) == 5 && args[0] == "pr" && args[1] == "view" &&
 		args[2] == "https://github.com/acme/service/pull/7" &&
-		args[3] == "--json" && args[4] == "url,number,state,isDraft,headRefOid,author"
+		args[3] == "--json" && args[4] == "url,number,state,isDraft,headRefOid,author,additions,deletions"
 	rawLogin := rawTarget == "login" && len(args) == 4 && args[0] == "api" && args[1] == "user" &&
 		args[2] == "--jq" && args[3] == ".login"
 	if rawView || rawLogin {
@@ -1997,7 +2001,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"url": args[2], "number": number, "state": state, "isDraft": os.Getenv("REVIEWCTL_FAKE_PR_DRAFT") != "",
-			"headRefOid": head, "author": map[string]string{"login": author},
+			"headRefOid": head, "author": map[string]string{"login": author}, "additions": 500, "deletions": 499,
 		})
 		return
 	}
@@ -2099,6 +2103,17 @@ func helperCodex(args []string) {
 		fmt.Println("Logged in")
 		return
 	}
+	if want := os.Getenv("REVIEWCTL_EXPECT_REVIEW_GRADE"); want != "" {
+		if !slices.Contains(args, `model_reasoning_effort="high"`) || !slices.Contains(args, "gpt-6.2-sol") {
+			fmt.Fprintln(os.Stderr, "unexpected Codex reasoning effort:", args)
+			os.Exit(2)
+		}
+		skill, err := os.ReadFile(".agents/skills/reviewctl-grade/SKILL.md")
+		if err != nil || !bytes.Equal(skill, embeddedGradeSkill) {
+			fmt.Fprintln(os.Stderr, "bundled review grade skill was not installed")
+			os.Exit(2)
+		}
+	}
 	jsonMode := false
 	var filtered []string
 	for i := 0; i < len(args); i++ {
@@ -2176,6 +2191,11 @@ func helperCodex(args []string) {
 		}
 	}
 	instruction, _ := io.ReadAll(os.Stdin)
+	if want := os.Getenv("REVIEWCTL_EXPECT_REVIEW_GRADE"); want != "" &&
+		!strings.Contains(string(instruction), "Selected review grade: "+want+".") {
+		fmt.Fprintln(os.Stderr, "unexpected review grade in Codex instruction")
+		os.Exit(2)
+	}
 	fields := map[string]string{}
 	for _, line := range strings.Split(string(instruction), "\n") {
 		if key, value, ok := strings.Cut(line, ": "); ok {

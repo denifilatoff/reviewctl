@@ -509,3 +509,26 @@ func TestHashSkillsSeparatesFileContentsFromTheNextPath(t *testing.T) {
 		t.Fatal("different skill trees produced the same digest")
 	}
 }
+
+func TestSelectReviewGrade(t *testing.T) {
+	zero, one, justBelow, threshold, negative := 0, 1, 999, 1000, -1
+	for _, tc := range []struct {
+		name                 string
+		additions, deletions *int
+		want                 string
+	}{
+		{"empty diff", &zero, &zero, "low"},
+		{"below the threshold", &justBelow, &zero, "low"},
+		{"additions and deletions reach the threshold", &justBelow, &one, "medium"},
+		{"deletions alone reach the threshold", &zero, &threshold, "medium"},
+		{"above the threshold", &threshold, &one, "medium"},
+		{"missing count", &zero, nil, ""},
+		{"negative count", &negative, &zero, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectReviewGrade(tc.additions, tc.deletions); got != tc.want {
+				t.Errorf("selected grade = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

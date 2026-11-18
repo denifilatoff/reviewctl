@@ -25,6 +25,9 @@ var embeddedAPMManifest []byte
 //go:embed apm.lock.yaml
 var embeddedAPMLock []byte
 
+//go:embed skills/reviewctl-grade/SKILL.md
+var embeddedGradeSkill []byte
+
 type Receipt struct {
 	Provider           string              `json:"provider"`
 	Repository         string              `json:"repository"`
@@ -106,6 +109,16 @@ func HashSkills(root string) (string, error) {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+func selectReviewGrade(additions, deletions *int) string {
+	if additions == nil || deletions == nil || *additions < 0 || *deletions < 0 {
+		return ""
+	}
+	if *additions >= 1000 || *deletions >= 1000-*additions {
+		return "medium"
+	}
+	return "low"
+}
+
 func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullRequest) (result Attempt) {
 	result = Attempt{PullRequest: pr, StartedAt: time.Now().UTC()}
 	defer func() { result.FinishedAt = time.Now().UTC() }()
@@ -142,6 +155,12 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 		setAttemptError(&result, err)
 		return result
 	}
+	grade := selectReviewGrade(resolved.Additions, resolved.Deletions)
+	if grade == "" {
+		setAttemptError(&result, fail("github_failed", "GitHub did not return valid pull request line counts"))
+		return result
+	}
+	cfg.Model, cfg.ReasoningEffort = "gpt-6.2-sol", "high"
 	authenticatedLogin, err := resolveGitHubLogin(ctx)
 	if err != nil {
 		setAttemptError(&result, err)
@@ -215,6 +234,7 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 
 	receiptPath := filepath.Join(workspace, "receipt.json")
 	instruction := trustedInstruction(pr, resolved.HeadSHA, digest, source, receiptPath, ownedIDs)
+	instruction = "Read .agents/skills/reviewctl-grade/SKILL.md before reviewing. Selected review grade: " + grade + ".\n" + instruction
 	var rejection string
 	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT
 		CASE WHEN error_code = 'draft_rejected' THEN error_message ELSE '' END FROM history
@@ -291,7 +311,15 @@ func installLockedSkills(ctx context.Context, workspace string) (string, error) 
 	if err := runCommand(ctx, project, nil, "apm", "install", "--frozen", "--root", workspace, "--target", "codex"); err != nil {
 		return "", err
 	}
-	digest, err := HashSkills(filepath.Join(workspace, ".agents", "skills"))
+	skills := filepath.Join(workspace, ".agents", "skills")
+	gradeSkill := filepath.Join(skills, "reviewctl-grade")
+	if err := os.MkdirAll(gradeSkill, 0o700); err != nil {
+		return "", fmt.Errorf("create review grade skill directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(gradeSkill, "SKILL.md"), embeddedGradeSkill, 0o600); err != nil {
+		return "", fmt.Errorf("install review grade skill: %w", err)
+	}
+	digest, err := HashSkills(skills)
 	if err != nil {
 		return "", err
 	}
@@ -349,7 +377,7 @@ func executeCommand(ctx context.Context, command *exec.Cmd, dir string, stdin io
 }
 
 func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, error) {
-	command := exec.CommandContext(ctx, "gh", "pr", "view", pr.URL, "--json", "url,number,state,isDraft,headRefOid,author")
+	command := exec.CommandContext(ctx, "gh", "pr", "view", pr.URL, "--json", "url,number,state,isDraft,headRefOid,author,additions,deletions")
 	prepareProcessGroup(command)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -362,6 +390,8 @@ func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, erro
 		State      string `json:"state"`
 		IsDraft    bool   `json:"isDraft"`
 		HeadRefOID string `json:"headRefOid"`
+		Additions  *int   `json:"additions"`
+		Deletions  *int   `json:"deletions"`
 		Author     struct {
 			Login string `json:"login"`
 		} `json:"author"`
@@ -371,7 +401,7 @@ func resolveGitHub(ctx context.Context, pr PullRequest) (GitHubPullRequest, erro
 	}
 	return GitHubPullRequest{
 		URL: wire.URL, Number: wire.Number, State: wire.State, IsDraft: wire.IsDraft,
-		HeadSHA: wire.HeadRefOID, Author: wire.Author.Login,
+		HeadSHA: wire.HeadRefOID, Author: wire.Author.Login, Additions: wire.Additions, Deletions: wire.Deletions,
 	}, nil
 }
 
