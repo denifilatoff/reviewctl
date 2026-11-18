@@ -1,15 +1,23 @@
 ---
 name: reviewctl-grade
-description: Apply the review grade selected by ReviewCTL when assigning native subagents to a pull request review.
+description: Run the full review skill and turn its result into a draft for ReviewCTL.
 ---
 
-Read the grade in the controller's instruction. The grade controls how many native subagents review the change.
-The coordinator and subagents use GPT-6.2 Sol with high reasoning effort for both grades.
+Run the installed `adversarial-code-review` skill in the full grade. Use one native reviewer per applicable axis,
+preserve the skill's two waves and measurement step, and ask a fresh subagent to verify the findings. Use GPT-6.2
+Sol with high reasoning effort for the coordinator and all subagents. The full grade applies regardless of diff
+size. Follow repository guidance for inspecting and testing code within the controller's scope.
 
-- For low, assign exactly two reviewers. Group the applicable review areas into two complementary assignments.
-- For medium, assign five reviewers by default. Use up to seven when distinct, material review areas warrant separate
-  attention.
+Put the skill's working directory under the controller's attempt workspace. Review only the pinned head.
+If the head changes, report a coverage gap so ReviewCTL can start a new attempt.
 
-Rank the applicable review areas after reading the diff and surrounding code. Give each reviewer a focused assignment,
-and ask reviewers to inspect and challenge candidate findings independently. Keep verification within the grade's
-subagent count. The coordinator verifies publication evidence and waits for all reviewers before publishing.
+Use the installed `review-delivery` schema to write `review.json`, then convert that result to the JSON draft in
+the controller's instruction. ReviewCTL handles delivery.
+
+- Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
+  any publication or discussion actions.
+- Include each verified new finding once. Keep major, minor, nit, and question labels. Use inline comments for
+  locations inside a diff hunk, mapping `new` to `RIGHT` and `old` to `LEFT`. Put other findings in the summary.
+- Use previous findings and the delivery skill's discussion rules to propose actions only for the thread IDs
+  listed by the controller. If evidence is missing, preserve the thread. Keep findings tied to such threads in
+  their discussion actions.

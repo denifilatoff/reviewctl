@@ -515,7 +515,7 @@ func runCodex(ctx context.Context, cfg Config, workspace, receipt, instruction s
 	if cfg.ReasoningEffort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(cfg.ReasoningEffort))
 	}
-	args = append(args, "-")
+	args = append(args, "-c", "agents.max_threads=20", "-")
 	command := exec.CommandContext(ctx, "codex", args...)
 	prepareProcessGroup(command)
 	command.Dir, command.Stdin = workspace, strings.NewReader(instruction)

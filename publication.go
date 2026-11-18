@@ -80,6 +80,9 @@ func validateDraft(draft ReviewDraft, attempt Attempt, owned []string, selfAutho
 		draft.Number != attempt.Number || draft.HeadSHA != attempt.HeadSHA || draft.SkillDigest != attempt.SkillDigest {
 		return fmt.Errorf("review draft scope does not match the pinned attempt")
 	}
+	if draft.Verdict == "REVIEW_INCOMPLETE" {
+		return fmt.Errorf("review incomplete: %s", strings.TrimSpace(draft.Body))
+	}
 	if draft.Verdict != "APPROVE" && draft.Verdict != "REQUEST_CHANGES" && !(selfAuthored && draft.Verdict == "COMMENT") {
 		return fmt.Errorf("review draft has an invalid verdict")
 	}
