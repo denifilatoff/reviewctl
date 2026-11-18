@@ -219,7 +219,8 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT
 		CASE WHEN error_code = 'draft_rejected' THEN error_message ELSE '' END FROM history
 		WHERE provider = ? AND repository = ? AND change_number = ? AND head_sha = ?
-		AND (cost_json != '' OR error_code = 'draft_rejected' OR success = 1)
+		AND (success = 1 OR error_code = 'draft_rejected' OR
+		(cost_json != '' AND error_code != 'codex_failed'))
 		ORDER BY id DESC LIMIT 1), '')`,
 		pr.Provider, pr.Repository, pr.Number, result.HeadSHA).Scan(&rejection); err != nil {
 		setAttemptError(&result, fail("state_failed", "read previous draft rejection: %v", err))

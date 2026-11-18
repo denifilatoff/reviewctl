@@ -383,6 +383,12 @@ func TestControllerReassessesRejectedDraft(t *testing.T) {
 	if err := store.Finish(ctx, first); err != nil {
 		t.Fatal(err)
 	}
+	failed := Attempt{PullRequest: pr, HeadSHA: first.HeadSHA, SkillDigest: first.SkillDigest, StartedAt: first.FinishedAt,
+		FinishedAt: first.FinishedAt, ErrorCode: "codex_failed", ErrorMessage: "Codex could not start",
+		Cost: &ReviewCost{UsageError: "Codex failed; recorded usage may be partial"}}
+	if err := store.Finish(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("REVIEWCTL_FAKE_REJECT_POST", "")
 	second := ProcessAttempt(ctx, cfg, store, pr)
 	if !second.Success || second.Recovered {

@@ -138,3 +138,29 @@ func TestReadDraftRejectsOversizedJSON(t *testing.T) {
 		t.Error("readDraft(valid JSON above 1 MiB) = nil error, want size rejection")
 	}
 }
+
+func TestDraftRejectsControllerMarkerInSummaryOrReply(t *testing.T) {
+	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
+	attempt := Attempt{PullRequest: pr, HeadSHA: "head", SkillDigest: "digest"}
+	owned := []string{"PRRT_owned"}
+	marker := reviewMarker(pr, attempt.HeadSHA, attempt.SkillDigest)
+	for _, field := range []string{"summary", "reply"} {
+		t.Run(field, func(t *testing.T) {
+			draft := ReviewDraft{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number,
+				HeadSHA: attempt.HeadSHA, SkillDigest: attempt.SkillDigest, Verdict: "REQUEST_CHANGES",
+				Body: "Review summary", Comments: []ReviewComment{},
+				Discussions: []DiscussionAction{{ThreadID: owned[0], Action: "open_with_reply", Body: "Review reply"}}}
+			if err := validateDraft(draft, attempt, owned, false); err != nil {
+				t.Fatalf("draft without a controller marker: %v", err)
+			}
+			if field == "summary" {
+				draft.Body += "\n" + marker
+			} else {
+				draft.Discussions[0].Body += "\n" + marker
+			}
+			if err := validateDraft(draft, attempt, owned, false); err == nil || !strings.Contains(err.Error(), "controller markers") {
+				t.Errorf("validate draft with marker in %s = %v, want marker rejection", field, err)
+			}
+		})
+	}
+}
