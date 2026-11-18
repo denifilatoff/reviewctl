@@ -80,6 +80,13 @@ func OpenStore(path string) (*Store, error) {
 			error_message TEXT NOT NULL DEFAULT '',
 			attempted_at INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS review_publications (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			change_number INTEGER NOT NULL,
+			payload TEXT NOT NULL,
+			PRIMARY KEY(provider, repository, change_number)
+		)`,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,
@@ -341,7 +348,12 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	case "untrusted_author", "pr_not_open", "pr_draft":
 		removeFromQueue = true
 	}
-	if attempt.Success {
+	var prepared int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM review_publications
+		WHERE provider = ? AND repository = ? AND change_number = ?`, attempt.Provider, attempt.Repository, attempt.Number).Scan(&prepared); err != nil {
+		return fmt.Errorf("inspect prepared publication: %w", err)
+	}
+	if attempt.Success && prepared == 0 {
 		if attempt.Cost != nil && !attempt.Recovered {
 			payload, err := json.Marshal(attempt)
 			if err != nil {
@@ -351,6 +363,12 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 				ON CONFLICT(review_id) DO NOTHING`, attempt.ReviewID, string(payload)); err != nil {
 				return fmt.Errorf("queue signature: %w", err)
 			}
+		}
+	}
+	if removeFromQueue || attempt.ErrorCode == "head_changed" || attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM review_publications
+			WHERE provider = ? AND repository = ? AND change_number = ?`, attempt.Provider, attempt.Repository, attempt.Number); err != nil {
+			return fmt.Errorf("complete prepared publication: %w", err)
 		}
 	}
 	if removeFromQueue {

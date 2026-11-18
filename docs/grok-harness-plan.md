@@ -1,5 +1,9 @@
 # Grok Harness Implementation Plan
 
+Status: Obsolete. This plan targets the former harness-owned publication and `Receipt` contract.
+Do not execute its tasks against the current code. A replacement plan must use `ReviewDraft` and controller-owned
+publication, as described in the [current architecture](architecture.md#trust-and-publication).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -14,6 +14,14 @@ import (
 const signatureStart = "<!-- reviewctl:model-cost -->"
 const signatureEnd = "<!-- /reviewctl:model-cost -->"
 
+type githubAPIError struct {
+	Status int
+	Err    error
+}
+
+func (e *githubAPIError) Error() string { return e.Err.Error() }
+func (e *githubAPIError) Unwrap() error { return e.Err }
+
 func reviewSignatureBody(body, signature, legacy string) (string, error) {
 	start, end := strings.Index(body, signatureStart), strings.Index(body, signatureEnd)
 	if start >= 0 || end >= 0 {
@@ -48,7 +56,22 @@ func githubJSON(ctx context.Context, args []string, input any, output any) error
 	var stderr tailWriter
 	command.Stdin, command.Stdout, command.Stderr = &stdin, &stdout, &stderr
 	if err := cleanupProcessGroup(command, command.Run()); err != nil {
-		return fmt.Errorf("gh: %w: %s", err, stderr)
+		var response struct {
+			Status json.RawMessage `json:"status"`
+			Errors json.RawMessage `json:"errors"`
+		}
+		_ = json.Unmarshal(stdout.Bytes(), &response)
+		status, _ := strconv.Atoi(strings.Trim(string(response.Status), "\""))
+		if status == 0 {
+			if index := strings.LastIndex(string(stderr), "(HTTP "); index >= 0 {
+				_, _ = fmt.Sscanf(string(stderr)[index:], "(HTTP %d)", &status)
+			}
+		}
+		detail := string(stderr)
+		if len(response.Errors) != 0 {
+			detail += " " + bounded(string(response.Errors), 512)
+		}
+		return &githubAPIError{Status: status, Err: fmt.Errorf("gh: %w: %s", err, detail)}
 	}
 	if stdout.exceeded {
 		return fmt.Errorf("GitHub response exceeds 8 MiB")
@@ -64,6 +87,7 @@ type submittedReview struct {
 	Body   string `json:"body"`
 	Commit string `json:"commit_id"`
 	URL    string `json:"html_url"`
+	State  string `json:"state"`
 	User   struct {
 		Login string `json:"login"`
 	} `json:"user"`

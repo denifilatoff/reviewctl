@@ -1,6 +1,6 @@
 # reviewctl
 
-`reviewctl` is a local CLI that queues GitHub pull requests and uses Codex to publish reviews.
+`reviewctl` is a local CLI that queues GitHub pull requests, uses Codex to analyze them, and publishes the reviews.
 
 ## Install
 
