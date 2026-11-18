@@ -82,8 +82,6 @@ Configuration lives at `$XDG_CONFIG_HOME/reviewctl/config.yaml`, or `~/.config/r
 
 ```yaml
 harness: codex
-model: gpt-6-astra
-reasoning_effort: low
 publish: true
 attempt_timeout: 1h
 
@@ -240,7 +238,7 @@ The execution path is linear:
 1. Resolve the configured pull request and current head through `gh`.
 2. Verify that the repository is configured and the exact author login is trusted.
 3. Create a fresh temporary workspace.
-4. Install and hash the locked skill set with APM.
+4. Install the locked APM skills and the bundled review grade skill, then hash the installed set.
 5. Write one trusted instruction.
 6. Run Codex to prepare a draft for the pinned SHA, including proposed actions for owned discussions.
 7. Validate the draft, add the marker and available accounting signature, and save the prepared publication.
@@ -311,8 +309,8 @@ apm install --frozen --root <attempt-workspace> --target codex
 `reviewctl` hashes the installed skill set once and includes the digest in the instruction, marker, draft validation,
 and history. An APM failure stops the attempt before Codex starts and is recorded in history.
 
-`reviewctl` does not implement skill lookup, copying, snapshot recovery, or configuration precedence. Updating review
-skills means updating the checked-in APM lockfile.
+Update the checked-in APM lockfile to change the pinned review skills. The bundled grade skill is installed from the
+ReviewCTL binary and participates in the same digest.
 
 ## Workspace
 

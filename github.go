@@ -31,12 +31,14 @@ func normalizeGitHubLogin(login string) string {
 }
 
 type GitHubPullRequest struct {
-	URL     string
-	Number  int64
-	State   string
-	IsDraft bool
-	HeadSHA string
-	Author  string
+	URL       string
+	Number    int64
+	State     string
+	IsDraft   bool
+	HeadSHA   string
+	Author    string
+	Additions *int
+	Deletions *int
 }
 
 type githubReviewComment struct {
