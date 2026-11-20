@@ -341,16 +341,21 @@ func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expe
 	}
 	var pages [][]struct {
 		ReviewComment
-		OriginalLine      int `json:"original_line"`
-		OriginalStartLine int `json:"original_start_line"`
+		ReviewID          int64 `json:"pull_request_review_id"`
+		OriginalLine      int   `json:"original_line"`
+		OriginalStartLine int   `json:"original_start_line"`
 	}
-	endpoint := fmt.Sprintf("repos/%s/pulls/%d/reviews/%d/comments", pr.Repository, pr.Number, id)
+	// The review-scoped endpoint omits line and side coordinates.
+	endpoint := fmt.Sprintf("repos/%s/pulls/%d/comments?per_page=100", pr.Repository, pr.Number)
 	if err := githubJSON(ctx, []string{endpoint, "--paginate", "--slurp"}, nil, &pages); err != nil {
 		return err
 	}
 	remaining := append([]ReviewComment(nil), expected...)
 	for _, page := range pages {
 		for _, wire := range page {
+			if wire.ReviewID != id {
+				continue
+			}
 			comment := wire.ReviewComment
 			if comment.Line == 0 {
 				comment.Line = wire.OriginalLine

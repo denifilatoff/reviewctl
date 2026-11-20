@@ -80,6 +80,7 @@ func TestControllerRejectsHeadChangeBeforePublication(t *testing.T) {
 
 func TestControllerRecoversLostPublicationResponse(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
+	t.Setenv("REVIEWCTL_FAKE_INLINE_COMMENT", "1")
 	t.Setenv("REVIEWCTL_FAKE_LOST_POST_RESPONSE", "1")
 	ctx := context.Background()
 	first := ProcessAttempt(ctx, cfg, store, pr)
@@ -406,14 +407,16 @@ func TestControllerReassessesRejectedDraft(t *testing.T) {
 }
 
 func TestControllerKeepsDraftOnInlineReadbackMismatch(t *testing.T) {
-	const original = `{"path":"main.go","line":12,"side":"RIGHT","body":"A finding."}`
+	const original = `{"pull_request_review_id":123,"path":"main.go","line":12,"side":"RIGHT","body":"A finding."}`
 	for _, test := range []struct {
 		name string
 		wire string
 	}{
 		{"missing", `[[]]`},
-		{"changed", `[[{"path":"main.go","line":12,"side":"RIGHT","body":"Edited finding."}]]`},
-		{"extra", `[[` + original + `,{"path":"other.go","line":1,"side":"LEFT","body":"Extra finding."}]]`},
+		{"changed body", `[[{"pull_request_review_id":123,"path":"main.go","line":12,"side":"RIGHT","body":"Edited finding."}]]`},
+		{"changed line", `[[` + strings.Replace(original, `"line":12`, `"line":13`, 1) + `]]`},
+		{"extra", `[[` + original + `,{"pull_request_review_id":123,"path":"other.go","line":1,"side":"LEFT","body":"Extra finding."}]]`},
+		{"matching comment from another review", `[[` + strings.Replace(original, `"pull_request_review_id":123`, `"pull_request_review_id":456`, 1) + `]]`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg, pr, store, temp := publicationFixture(t)
@@ -452,7 +455,8 @@ func TestControllerKeepsDraftOnInlineReadbackMismatch(t *testing.T) {
 
 func TestPublishedCommentsAcceptOriginalLocations(t *testing.T) {
 	_, pr, _, temp := publicationFixture(t)
-	wire := `[[{"path":"main.go","line":null,"original_line":12,"side":"RIGHT",` +
+	wire := `[[{"pull_request_review_id":456,"path":"other.go","line":2,"side":"LEFT","body":"An earlier review."}],` +
+		`[{"pull_request_review_id":123,"path":"main.go","line":null,"original_line":12,"side":"RIGHT",` +
 		`"start_line":null,"original_start_line":10,"start_side":"RIGHT","body":"A finding."}]]`
 	if err := os.WriteFile(filepath.Join(temp, "published.comments.json"), []byte(wire), 0o600); err != nil {
 		t.Fatal(err)
