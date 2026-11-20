@@ -1662,7 +1662,15 @@ func helperGH(args []string) {
 			review.User.Login = "reviewer"
 		}
 		encoded, _ := json.Marshal(review)
-		comments, _ := json.Marshal([][]ReviewComment{request.Comments})
+		type reviewComment struct {
+			ReviewComment
+			ReviewID int64 `json:"pull_request_review_id"`
+		}
+		var reviewComments []reviewComment
+		for _, comment := range request.Comments {
+			reviewComments = append(reviewComments, reviewComment{comment, review.ID})
+		}
+		comments, _ := json.Marshal([][]reviewComment{reviewComments})
 		for name, contents := range map[string][]byte{state: []byte("123"), state + ".review.json": encoded,
 			state + ".request.json": data, state + ".comments.json": comments,
 			state + ".posts": []byte(strconv.Itoa(readTestCounter(state+".posts") + 1))} {
@@ -1733,6 +1741,10 @@ func helperGH(args []string) {
 		return
 	}
 	if len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/reviews/") && strings.HasSuffix(args[1], "/comments") {
+		fmt.Print(`[[{"pull_request_review_id":123,"path":"main.go","position":4,"original_position":4,"body":"A finding."}]]`)
+		return
+	}
+	if len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/pulls/") && strings.HasSuffix(args[1], "/comments?per_page=100") {
 		if response := os.Getenv("REVIEWCTL_FAKE_COMMENTS_RESPONSE"); response != "" {
 			fmt.Print(response)
 			return
