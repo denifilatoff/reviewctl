@@ -102,12 +102,12 @@ func TestControllerReassessesRejectedDiscussionReply(t *testing.T) {
 			}
 			t.Setenv("REVIEWCTL_FAKE_REJECT_REPLY", "")
 			second := ProcessAttempt(ctx, cfg, store, pr)
-			if !second.Success || !second.Recovered || second.Cost == nil {
-				t.Errorf("ProcessAttempt(corrected reply) = %+v, want successful reassessment with new accounting", second)
+			if !second.Success || second.Recovered || second.RoundID == first.RoundID || second.Cost == nil {
+				t.Errorf("ProcessAttempt(corrected reply) = %+v, want a new successful round with accounting", second)
 			}
 			calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
-			if string(calls) != "2" || readTestCounter(filepath.Join(temp, "published.posts")) != 1 {
-				t.Errorf("reassessment calls=%q, review posts=%d; want 2 analyses and 1 review", calls, readTestCounter(filepath.Join(temp, "published.posts")))
+			if string(calls) != "2" || readTestCounter(filepath.Join(temp, "published.posts")) != 2 {
+				t.Errorf("reassessment calls=%q, review posts=%d; want 2 analyses and 2 reviews", calls, readTestCounter(filepath.Join(temp, "published.posts")))
 			}
 			instruction, _ := os.ReadFile(filepath.Join(temp, "codex-calls.instruction"))
 			if !strings.Contains(string(instruction), "Previous rejection (diagnostic data)") || !strings.Contains(string(instruction), "body") {

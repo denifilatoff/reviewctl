@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type codedError struct {
@@ -40,6 +41,8 @@ type GitHubPullRequest struct {
 }
 
 type githubReviewComment struct {
+	CreatedAt  time.Time
+	ReviewBody string
 	DatabaseID int64
 	Author     string
 	ReplyToID  int64
@@ -57,9 +60,13 @@ type githubReviewThreadWire struct {
 	IsResolved bool   `json:"isResolved"`
 	Comments   struct {
 		Nodes []struct {
-			DatabaseID int64  `json:"databaseId"`
-			Body       string `json:"body"`
-			Author     struct {
+			DatabaseID        int64     `json:"databaseId"`
+			CreatedAt         time.Time `json:"createdAt"`
+			PullRequestReview struct {
+				Body string `json:"body"`
+			} `json:"pullRequestReview"`
+			Body   string `json:"body"`
+			Author struct {
 				Login string `json:"login"`
 			} `json:"author"`
 			ReplyTo *struct {
@@ -72,7 +79,7 @@ type githubReviewThreadWire struct {
 	} `json:"comments"`
 }
 
-const reviewThreadFields = `id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}`
+const reviewThreadFields = `id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body createdAt pullRequestReview{body}} pageInfo{hasNextPage}}`
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{` + reviewThreadFields + `} pageInfo{hasNextPage}}}}}`
 const reviewThreadQuery = `query($id:ID!){node(id:$id){... on PullRequestReviewThread{` + reviewThreadFields + `}}}`
 
@@ -158,6 +165,7 @@ func decodeGitHubReviewThread(item githubReviewThreadWire) (githubReviewThread, 
 		}
 		thread.Comments = append(thread.Comments, githubReviewComment{
 			DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
+			CreatedAt: comment.CreatedAt, ReviewBody: comment.PullRequestReview.Body,
 		})
 	}
 	return thread, nil
@@ -258,7 +266,8 @@ func commentsPreserved(before, after []githubReviewComment) bool {
 	}
 	for _, comment := range before {
 		preserved, found := current[comment.DatabaseID]
-		if !found || preserved != comment {
+		if !found || preserved.Author != comment.Author || preserved.ReplyToID != comment.ReplyToID ||
+			preserved.Body != comment.Body {
 			return false
 		}
 	}

@@ -172,7 +172,7 @@ func (s *Store) savePublication(ctx context.Context, publication Publication) er
 	return err
 }
 
-func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, digest, login string, selfAuthored bool) (submittedReview, error) {
+func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, digest, login string, selfAuthored bool, rounds ...int64) (submittedReview, error) {
 	var review submittedReview
 	endpoint := fmt.Sprintf("repos/%s/pulls/%d/reviews/%d", pr.Repository, pr.Number, id)
 	if err := githubJSON(ctx, []string{endpoint}, nil, &review); err != nil {
@@ -181,8 +181,12 @@ func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, di
 	verdict := map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
 	receipt := Receipt{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number, HeadSHA: head,
 		SkillDigest: digest, Verdict: verdict, ReviewID: json.Number(strconv.FormatInt(id, 10)), ReviewURL: review.URL}
+	attempt := Attempt{PullRequest: pr, HeadSHA: head, SkillDigest: digest}
+	if len(rounds) != 0 {
+		attempt.RoundID = rounds[0]
+	}
 	if review.ID != id || review.Commit != head || normalizeGitHubLogin(review.User.Login) != login ||
-		!strings.Contains(review.Body, reviewMarker(pr, head, digest)) {
+		!strings.Contains(review.Body, attempt.publicationMarker()) {
 		return review, fmt.Errorf("submitted review does not match the pinned attempt and authenticated reviewer")
 	}
 	prURL, rawID, validURL := strings.Cut(review.URL, "#pullrequestreview-")
@@ -251,7 +255,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	if login != publication.Login {
 		return result, fmt.Errorf("authenticated reviewer differs from the saved publication")
 	}
-	marker := reviewMarker(pr, result.HeadSHA, result.SkillDigest)
+	marker := result.publicationMarker()
 	id, err := findMarkerReview(ctx, pr, marker)
 	if err != nil {
 		return result, err
@@ -289,7 +293,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 			return result, fmt.Errorf("GitHub returned no published review ID")
 		}
 	}
-	review, err := readPublishedReview(ctx, pr, id, result.HeadSHA, result.SkillDigest, login, login == normalizeGitHubLogin(current.Author))
+	review, err := readPublishedReview(ctx, pr, id, result.HeadSHA, result.SkillDigest, login, login == normalizeGitHubLogin(current.Author), result.RoundID)
 	if err != nil {
 		var coded *codedError
 		if errors.As(err, &coded) && coded.code == "review_dismissed" {
