@@ -128,6 +128,10 @@ Discussion snapshots are checked before a new review is submitted. Before each d
 the pinned head and the affected thread. It reads a posted reply back before changing the thread's resolution, so
 new human replies require reassessment rather than closure based on an older conversation.
 
+ReviewCTL reads every page of threads and replies to build a complete discussion snapshot. If a read returns
+`github_failed` with `GitHub returned an incomplete page`, `GitHub repeated a pagination cursor`, or
+`GitHub returned no cursor for the next page`, the PR stays queued. The next scheduled `run` retries the read.
+
 Prepared publications in SQLite contain the review text, inline findings, and proposed replies until delivery completes.
 Existing pending signature deliveries are retried separately. `signature_pending` returns exit code `1` until such
 a delivery succeeds. An unavailable cost estimate is not automatically recalculated.

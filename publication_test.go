@@ -144,6 +144,7 @@ func TestControllerRejectsDraftForAnotherCommit(t *testing.T) {
 
 func TestControllerRecoversLostDiscussionReplyResponse(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
+	t.Setenv("REVIEWCTL_FAKE_GRAPHQL_PAGE_SIZE", "1")
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
 	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved_with_reply")
 	t.Setenv("REVIEWCTL_FAKE_LOST_REPLY_RESPONSE", "1")
