@@ -2139,13 +2139,9 @@ func fakeGHThreads() []githubReviewThread {
 		}
 	} else if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
 		threads = append(threads, githubReviewThread{ID: "PRRT_owned",
-			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer", Body: "Original finding."}}})
-	}
-	for _, thread := range threads {
-		if len(thread.Comments) != 0 && thread.Comments[0].Author == "reviewer" && thread.Comments[0].ReviewBody == "" {
-			thread.Comments[0].ReviewBody = reviewMarker(PullRequest{Provider: "github", Repository: "acme/service", Number: 7},
-				"0123456789abcdef0123456789abcdef01234567", "sha256:legacy")
-		}
+			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer", Body: "Original finding.",
+				ReviewBody: reviewMarker(PullRequest{Provider: "github", Repository: "acme/service", Number: 7},
+					"0123456789abcdef0123456789abcdef01234567", "sha256:legacy")}}})
 	}
 	return threads
 }

@@ -313,9 +313,10 @@ func TestControllerBatchesPreservedDiscussions(t *testing.T) {
 	countFile := filepath.Join(temp, "thread-reads")
 	t.Setenv("REVIEWCTL_FAKE_THREAD_READS", countFile)
 	threads := make([]githubReviewThread, 100)
+	marker := reviewMarker(pr, "historic", "sha256:legacy")
 	for i := range threads {
 		threads[i] = githubReviewThread{ID: fmt.Sprintf("PRRT_%d", i),
-			Comments: []githubReviewComment{{DatabaseID: int64(i + 1), Author: "reviewer", Body: "Original finding."}}}
+			Comments: []githubReviewComment{{DatabaseID: int64(i + 1), Author: "reviewer", Body: "Original finding.", ReviewBody: marker}}}
 	}
 	data, _ := json.Marshal(threads)
 	if err := os.WriteFile(filepath.Join(temp, "published.threads.json"), data, 0o600); err != nil {
