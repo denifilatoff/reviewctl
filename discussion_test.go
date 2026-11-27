@@ -45,10 +45,11 @@ func TestControllerReopensResolvedDiscussion(t *testing.T) {
 func TestControllerSynchronizesOwnedThreadsIndependently(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved_with_reply")
+	marker := reviewMarker(pr, "historic", "sha256:legacy")
 	threads := []githubReviewThread{
-		{ID: "PRRT_first", Comments: []githubReviewComment{{DatabaseID: 11, Author: "reviewer", Body: "First finding."}}},
+		{ID: "PRRT_first", Comments: []githubReviewComment{{DatabaseID: 11, Author: "reviewer", Body: "First finding.", ReviewBody: marker}}},
 		{ID: "PRRT_foreign", Comments: []githubReviewComment{{DatabaseID: 12, Author: "human", Body: "Human finding."}}},
-		{ID: "PRRT_second", Comments: []githubReviewComment{{DatabaseID: 13, Author: "reviewer", Body: "Second finding."}}},
+		{ID: "PRRT_second", Comments: []githubReviewComment{{DatabaseID: 13, Author: "reviewer", Body: "Second finding.", ReviewBody: marker}}},
 	}
 	data, err := json.Marshal(threads)
 	if err != nil {
