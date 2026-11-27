@@ -8,8 +8,8 @@ preserve the skill's two waves and measurement step, and ask a fresh subagent to
 Sol with high reasoning effort for the coordinator and all subagents. The full grade applies regardless of diff
 size. Follow repository guidance for inspecting and testing code within the controller's scope.
 
-Put the skill's working directory under the controller's attempt workspace. Review only the pinned head.
-If the head changes, report a coverage gap so ReviewCTL can start a new attempt.
+Put the skill's working directory under the controller's attempt workspace. Use the pinned checkout and
+revision-specific diff throughout the pass. A change to the current PR head does not change the review's target.
 
 Use the installed `review-delivery` schema to write the final `review.json` at the path in the controller's instruction,
 then convert that result to the controller's JSON draft. Use its previous report as the skill's previous input.
@@ -18,8 +18,8 @@ ReviewCTL handles delivery.
 
 - Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
   any publication or discussion actions.
-- Include each verified new finding once. Keep major, minor, nit, and question labels. Use inline comments for
-  locations inside a diff hunk, mapping `new` to `RIGHT` and `old` to `LEFT`. Put other findings in the summary.
-- Use previous findings and the delivery skill's discussion rules to propose actions only for the thread IDs
-  listed by the controller. If evidence is missing, preserve the thread. Keep findings tied to such threads in
-  their discussion actions.
+- Include each verified new finding once. Keep major, minor, nit, and question labels in `review.json`. Use inline
+  comments for new findings inside a diff hunk, mapping `new` to `RIGHT` and `old` to `LEFT`.
+- Follow the controller's finding registry instructions. Use the previous report and linked discussions to
+  identify known findings and substantiate each change. Return each assessment in `finding_assessments` and leave
+  `discussions` empty. ReviewCTL assigns stable IDs and decides thread actions.
