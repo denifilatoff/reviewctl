@@ -47,7 +47,7 @@ func TestListGitHubReviewThreadsFollowsThreadAndCommentCursors(t *testing.T) {
 	_, pr, _, temp := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_GRAPHQL_PAGE_SIZE", "1")
 	want := []githubReviewThread{
-		{ID: "PRRT_resolved", IsResolved: true, Comments: []githubReviewComment{
+		{ID: "PRRT_resolved", IsResolved: true, ResolvedBy: "reviewer", Comments: []githubReviewComment{
 			{DatabaseID: 1, Author: "reviewer", Body: "Finding."},
 			{DatabaseID: 2, Author: "author", ReplyToID: 1, Body: "Fix applied."},
 			{DatabaseID: 3, Author: "reviewer", ReplyToID: 1, Body: "Fix verified."},

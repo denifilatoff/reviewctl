@@ -1307,6 +1307,7 @@ func TestProcessAttemptRejectsMissingOwnedDiscussionOutcome(t *testing.T) {
 	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
 	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
+	t.Setenv("REVIEWCTL_FAKE_OMIT_FINDING_ASSESSMENTS", "1")
 
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	cfg := Config{
@@ -1677,8 +1678,21 @@ func helperGH(args []string) {
 			ReviewID int64 `json:"pull_request_review_id"`
 		}
 		var reviewComments []reviewComment
-		for _, comment := range request.Comments {
+		threads := fakeGHThreads()
+		for i, comment := range request.Comments {
 			reviewComments = append(reviewComments, reviewComment{comment, review.ID})
+			commentID := review.ID*100 + int64(i)
+			threads = append(threads, githubReviewThread{
+				ID: fmt.Sprintf("PRRT_inline_%d", commentID),
+				Comments: []githubReviewComment{{DatabaseID: commentID, Author: review.User.Login,
+					Body: comment.Body, ReviewBody: review.Body}},
+			})
+		}
+		if len(request.Comments) != 0 {
+			data, _ := json.Marshal(threads)
+			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
+				os.Exit(76)
+			}
 		}
 		comments, _ := json.Marshal([][]reviewComment{reviewComments})
 		for name, contents := range map[string][]byte{state: []byte(strconv.FormatInt(id, 10)), state + ".review.json": encoded,
@@ -1812,6 +1826,13 @@ func helperGH(args []string) {
 				os.Exit(76)
 			}
 			threads[target].IsResolved = !strings.Contains(request.Query, "unresolveReviewThread")
+			threads[target].ResolvedBy = ""
+			if threads[target].IsResolved {
+				threads[target].ResolvedBy = os.Getenv("REVIEWCTL_FAKE_LOGIN")
+				if threads[target].ResolvedBy == "" {
+					threads[target].ResolvedBy = "reviewer"
+				}
+			}
 			data, _ := json.Marshal(threads)
 			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
 				os.Exit(76)
@@ -1844,7 +1865,7 @@ func helperGH(args []string) {
 			if fields["id"] != "" {
 				commentCursor = fields["after"]
 			}
-			nodes = append(nodes, map[string]any{"id": thread.ID, "isResolved": thread.IsResolved,
+			nodes = append(nodes, map[string]any{"id": thread.ID, "isResolved": thread.IsResolved, "resolvedBy": map[string]string{"login": thread.ResolvedBy},
 				"comments": fakeGHReviewPage(comments, commentCursor)})
 		}
 		if fields["id"] != "" {
@@ -2110,11 +2131,11 @@ func fakeGHThreads() []githubReviewThread {
 		if json.Unmarshal(data, &threads) != nil {
 			os.Exit(76)
 		}
-		return threads
-	}
-	if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
+	} else if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
 		threads = append(threads, githubReviewThread{ID: "PRRT_owned",
-			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}})
+			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer", Body: "Original finding.",
+				ReviewBody: reviewMarker(PullRequest{Provider: "github", Repository: "acme/service", Number: 7},
+					"0123456789abcdef0123456789abcdef01234567", "sha256:legacy")}}})
 	}
 	return threads
 }
@@ -2298,38 +2319,33 @@ func helperCodex(args []string) {
 	draft := ReviewDraft{Provider: "github", Repository: fields["Repository"], Number: number,
 		HeadSHA: fields["Expected head"], SkillDigest: fields["Skill digest"], Verdict: verdict,
 		Body: "Review findings", Comments: []ReviewComment{}, Discussions: []DiscussionAction{}}
-	if action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION"); action != "" {
-		body := ""
-		if strings.HasSuffix(action, "_with_reply") {
-			body = "Verified the updated implementation."
-		}
-		var owned []string
-		if json.Unmarshal([]byte(fields["Pre-existing owned discussion thread IDs"]), &owned) != nil {
+	var findings []map[string]any
+	if snapshot := fields["Finding registry snapshot"]; snapshot != "" {
+		var input FindingPass
+		data, err := os.ReadFile(snapshot)
+		if err != nil || json.Unmarshal(data, &input) != nil {
 			os.Exit(95)
 		}
-		for _, id := range owned {
-			draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: id, Action: action, Body: body})
-		}
-	}
-	if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
+		findings = helperFindingAssessments(&draft, input)
+	} else if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
 		draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: "A finding."})
 	}
 	if head := os.Getenv("REVIEWCTL_FAKE_RECEIPT_HEAD"); head != "" {
 		draft.HeadSHA = head
 	}
 	data, _ := json.Marshal(draft)
-	if os.Getenv("REVIEWCTL_FAKE_GENERAL_FINDING") != "" {
-		var wire map[string]any
-		_ = json.Unmarshal(data, &wire)
-		wire["new_findings"] = true
-		wire["body"] = "A new general finding outside the diff."
-		data, _ = json.Marshal(wire)
-	}
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
 	}
 	if path := fields["Review report path"]; path != "" {
-		report, _ := json.Marshal(map[string]any{"head": draft.HeadSHA, "findings": []any{}})
+		reportVerdict := strings.ToLower(draft.Verdict)
+		if reportVerdict == "comment" {
+			reportVerdict = "approve"
+		}
+		report, _ := json.Marshal(map[string]any{
+			"schema_version": 1, "target": map[string]string{"platform": "github", "url": fields["Pull request URL"]},
+			"revision": map[string]string{"base": "base", "head": draft.HeadSHA}, "result": reportVerdict, "findings": findings,
+		})
 		evidence := fields["Evidence directory"]
 		if os.WriteFile(path, report, 0o600) != nil || os.MkdirAll(evidence, 0o700) != nil ||
 			os.WriteFile(filepath.Join(evidence, "verification.txt"), []byte(draft.HeadSHA), 0o600) != nil ||
@@ -2348,4 +2364,52 @@ func helperCodex(args []string) {
 	} else {
 		os.Stdout.Write(data)
 	}
+}
+
+func helperFindingAssessments(draft *ReviewDraft, input FindingPass) []map[string]any {
+	findings := []map[string]any{}
+	draft.FindingAssessments = []FindingAssessment{}
+	action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION")
+	knownTitles := make(map[string]bool)
+	for _, entry := range input.Registry.Findings {
+		knownTitles[entry.Title] = true
+		if os.Getenv("REVIEWCTL_FAKE_OMIT_FINDING_ASSESSMENTS") != "" {
+			continue
+		}
+		assessment := FindingAssessment{KnownID: entry.ID, Reason: "Verified the updated implementation."}
+		switch {
+		case action == "open_with_reply" && (entry.Status == findingFixed || entry.Status == findingRegression):
+			assessment.Status = findingRegression
+		case entry.Status == findingOpen || entry.Status == findingRegression:
+			assessment.Status = findingOpen
+			if strings.HasPrefix(action, "resolved") {
+				assessment.Status = findingFixed
+			}
+		default:
+			continue
+		}
+		draft.FindingAssessments = append(draft.FindingAssessments, assessment)
+	}
+	for _, newFinding := range []struct {
+		flag, title string
+		inline      bool
+	}{
+		{"REVIEWCTL_FAKE_INLINE_COMMENT", "A finding.", true},
+		{"REVIEWCTL_FAKE_GENERAL_FINDING", "A new general finding outside the diff.", false},
+	} {
+		if os.Getenv(newFinding.flag) == "" || knownTitles[newFinding.title] {
+			continue
+		}
+		id := findingID(len(findings) + 1)
+		findings = append(findings, map[string]any{"id": id, "title": newFinding.title, "kind": "defect",
+			"severity": "major", "confidence": "high", "axis": "correctness", "location": nil,
+			"problem": newFinding.title, "proposed_solution": "Validate the input."})
+		assessment := FindingAssessment{ReportID: id, Status: findingOpen, Reason: newFinding.title}
+		if newFinding.inline {
+			draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: newFinding.title})
+			assessment.Comment = len(draft.Comments)
+		}
+		draft.FindingAssessments = append(draft.FindingAssessments, assessment)
+	}
+	return findings
 }

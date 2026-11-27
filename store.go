@@ -19,22 +19,23 @@ type Store struct {
 
 type Attempt struct {
 	PullRequest
-	RoundID      int64       `json:"round_id,omitempty"`
-	RoundKey     string      `json:"round_key,omitempty"`
-	Pass         int         `json:"pass,omitempty"`
-	Held         bool        `json:"held,omitempty"`
-	Cost         *ReviewCost `json:"cost,omitempty"`
-	HeadSHA      string      `json:"head_sha,omitempty"`
-	SkillDigest  string      `json:"skill_digest,omitempty"`
-	StartedAt    time.Time   `json:"started_at"`
-	FinishedAt   time.Time   `json:"finished_at"`
-	Success      bool        `json:"success"`
-	Verdict      string      `json:"verdict,omitempty"`
-	ReviewID     string      `json:"review_id,omitempty"`
-	ReviewURL    string      `json:"review_url,omitempty"`
-	Recovered    bool        `json:"recovered,omitempty"`
-	ErrorCode    string      `json:"error_code,omitempty"`
-	ErrorMessage string      `json:"error_message,omitempty"`
+	RoundID            int64               `json:"round_id,omitempty"`
+	RoundKey           string              `json:"round_key,omitempty"`
+	Pass               int                 `json:"pass,omitempty"`
+	Held               bool                `json:"held,omitempty"`
+	Cost               *ReviewCost         `json:"cost,omitempty"`
+	HeadSHA            string              `json:"head_sha,omitempty"`
+	SkillDigest        string              `json:"skill_digest,omitempty"`
+	StartedAt          time.Time           `json:"started_at"`
+	FinishedAt         time.Time           `json:"finished_at"`
+	Success            bool                `json:"success"`
+	Verdict            string              `json:"verdict,omitempty"`
+	ReviewID           string              `json:"review_id,omitempty"`
+	ReviewURL          string              `json:"review_url,omitempty"`
+	Recovered          bool                `json:"recovered,omitempty"`
+	DiscussionOutcomes []DiscussionOutcome `json:"discussion_outcomes,omitempty"`
+	ErrorCode          string              `json:"error_code,omitempty"`
+	ErrorMessage       string              `json:"error_message,omitempty"`
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -116,6 +117,8 @@ func OpenStore(path string) (*Store, error) {
 			comment_id INTEGER NOT NULL,
 			PRIMARY KEY(provider, repository, change_number, source, comment_id)
 		)`,
+		findingRegistryTable,
+		findingPassesTable,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,
