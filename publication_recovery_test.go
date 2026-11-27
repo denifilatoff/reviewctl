@@ -116,27 +116,6 @@ func TestControllerDefersRecoveryCostWhenAccountingLookupFails(t *testing.T) {
 	}
 }
 
-func TestControllerChecksHeadAfterMarkerRecovery(t *testing.T) {
-	cfg, pr, store, temp := publicationFixture(t)
-	ctx := context.Background()
-	first := ProcessAttempt(ctx, cfg, store, pr)
-	if !first.Success {
-		t.Fatal(first.ErrorMessage)
-	}
-	if err := store.Finish(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("REVIEWCTL_FAKE_HEAD_COUNTER", filepath.Join(temp, "head-counter"))
-	recovered := ProcessAttempt(ctx, cfg, store, pr)
-	current, err := resolveGitHub(ctx, pr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovered.Success || recovered.ErrorCode != "head_changed" || recovered.HeadSHA == current.HeadSHA {
-		t.Errorf("ProcessAttempt(recovery with concurrent push) = success for %s, current head %s; want head_changed", recovered.HeadSHA, current.HeadSHA)
-	}
-}
-
 func TestControllerRejectsStaleDiscussionBeforeReviewPost(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
 	ctx := context.Background()
@@ -224,8 +203,8 @@ func TestControllerKeepsDiscussionOpenAfterInterveningReply(t *testing.T) {
 	if len(threads) != 1 || len(threads[0].Comments) != 3 {
 		t.Fatalf("discussion after the simulated human reply = %+v, want the original, controller reply, and human objection", threads)
 	}
-	if result.Success || result.ErrorCode != "discussion_changed" || threads[0].IsResolved {
-		t.Errorf("ProcessAttempt(human objection before resolve) = success %v, resolved true; want discussion_changed with the thread open", result.Success)
+	if !result.Success || threads[0].IsResolved || len(result.DiscussionOutcomes) != 0 {
+		t.Errorf("ProcessAttempt(human objection before resolve) = %+v, resolved=%v, want completed publication with the thread open", result, threads[0].IsResolved)
 	}
 }
 
@@ -272,7 +251,7 @@ func TestControllerRetiresMissingReviewForNewHead(t *testing.T) {
 	}
 	t.Setenv("REVIEWCTL_FAKE_HEAD_AFTER_POST", "1")
 	third := ProcessAttempt(ctx, cfg, store, pr)
-	if third.ErrorCode != "head_changed" {
+	if third.ErrorCode != "review_changed" || third.ReviewID != second.ReviewID {
 		t.Errorf("new head is blocked by old missing marker: success=%v, code=%s, message=%s", third.Success, third.ErrorCode, third.ErrorMessage)
 	}
 	if err := store.Finish(ctx, third); err != nil {
@@ -313,7 +292,7 @@ func TestControllerPublishesNewGeneralFindingInSameHeadRound(t *testing.T) {
 	}
 }
 
-func TestControllerKeepsDiscussionOpenAfterReplyHeadChange(t *testing.T) {
+func TestControllerCompletesVerifiedThreadActionAfterReplyHeadChange(t *testing.T) {
 	cfg, pr, store, _ := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
 	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved_with_reply")
@@ -323,8 +302,8 @@ func TestControllerKeepsDiscussionOpenAfterReplyHeadChange(t *testing.T) {
 	if len(threads) != 1 || len(threads[0].Comments) != 2 {
 		t.Fatalf("discussion after reply = %+v, want the original and controller reply", threads)
 	}
-	if result.Success || result.ErrorCode != "head_changed" || threads[0].IsResolved {
-		t.Errorf("ProcessAttempt(push after reply) = %+v, resolved=%v; want head_changed without resolving", result, threads[0].IsResolved)
+	if !result.Success || result.ObservedHeadSHA == "" || result.ObservedHeadSHA == result.HeadSHA || !threads[0].IsResolved {
+		t.Errorf("ProcessAttempt(push after reply) = %+v, resolved=%v, want completed action on the verified commit and a follow-up head", result, threads[0].IsResolved)
 	}
 }
 

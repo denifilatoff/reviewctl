@@ -129,6 +129,8 @@ If a push arrives before publication, ReviewCTL keeps the completed pass and rev
 the same round. After five catch-up passes, further drift produces a `COMMENT` on the last reviewed commit. The comment
 identifies both that commit and the head observed after the pass. If GitHub rejects its inline locations, ReviewCTL
 checks for the round marker before retrying with the affected findings and locations in the review body.
+An earlier pass appears in history as `catch_up` with the message “A push arrived before publication. The completed
+pass is saved for catch-up.” The round publishes one result.
 
 Review and reply markers let a retry recover a successful request whose response was lost. `discussion_changed`
 retains the PR for reassessment when a human reply or state change invalidates a saved discussion action. Check the
@@ -138,6 +140,9 @@ ReviewCTL checks the discussion snapshot before submitting a new review. Once Gi
 delivery can resume after a push. Thread ownership, current state, and reply readback still govern each write.
 A newer head or eligible author reply during delivery queues another round. A pause at a pass boundary saves the
 pass and holds both catch-up and publication until the round can continue.
+
+`review_changed` means the saved review's marker is missing or its body changed after publication and the PR has a
+newer head. The existing review remains on GitHub, and the next run can assess the newer head in a fresh round.
 
 ReviewCTL reads every page of threads and replies to build a complete discussion snapshot. If a read returns
 `github_failed` with `GitHub returned an incomplete page`, `GitHub repeated a pagination cursor`, or

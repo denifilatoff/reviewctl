@@ -292,7 +292,7 @@ func publishPreparedPass(ctx context.Context, cfg Config, store *Store, publicat
 	if result.ErrorCode != "head_changed" {
 		return result, false
 	}
-	if err := store.discardUnstartedPublication(ctx, publication.Attempt.PullRequest); err != nil {
+	if err := store.discardUnstartedPublication(ctx, publication.Attempt); err != nil {
 		setAttemptError(&result, fail("state_failed", "retire prepared publication before catch-up: %v", err))
 		return result, false
 	}
@@ -325,7 +325,11 @@ func publishReviewPass(ctx context.Context, cfg Config, store *Store, pass Publi
 		setAttemptError(&result, fail("state_failed", "read original publication accounting: %v", err))
 		return result
 	}
-	result, err = deliverPublication(ctx, cfg, pass)
+	result, err = deliverPublication(ctx, cfg, pass, func(id int64) error {
+		published := pass
+		published.PublishedReviewID = id
+		return store.replacePreparedPublication(ctx, published)
+	})
 	result.StartedAt, result.Cost = accounting.StartedAt, accounting.Cost
 	if err != nil {
 		setPublicationError(&result, err)

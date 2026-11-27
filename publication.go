@@ -48,11 +48,12 @@ type DiscussionAction struct {
 }
 
 type Publication struct {
-	Attempt          Attempt
-	Draft            ReviewDraft
-	Login            string
-	Threads          []githubReviewThread
-	ExistingReviewID int64
+	Attempt           Attempt
+	Draft             ReviewDraft
+	Login             string
+	Threads           []githubReviewThread
+	ExistingReviewID  int64
+	PublishedReviewID int64 `json:",omitempty"`
 }
 
 func readDraft(filePath string) (ReviewDraft, error) {
@@ -249,7 +250,7 @@ func isGitHubValidationError(err error) bool {
 	return errors.As(err, &apiError) && (apiError.Status == 400 || apiError.Status == 422)
 }
 
-func deliverPublication(ctx context.Context, cfg Config, publication Publication) (Attempt, error) {
+func deliverPublication(ctx context.Context, cfg Config, publication Publication, recordReviewID func(int64) error) (Attempt, error) {
 	result := publication.Attempt
 	pr := result.PullRequest
 	if result.ObservedHeadSHA != "" && (result.RoundID == 0 ||
@@ -275,6 +276,13 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	result.Recovered = id != 0
 	if publication.ExistingReviewID != 0 && id != publication.ExistingReviewID {
 		return result, fmt.Errorf("saved review is missing or its marker changed")
+	}
+	if publication.PublishedReviewID != 0 && id != publication.PublishedReviewID {
+		result.ReviewID = strconv.FormatInt(publication.PublishedReviewID, 10)
+		if id == 0 && current.HeadSHA != result.HeadSHA {
+			return result, fail("review_changed", "published review marker is missing; reassess in a new round")
+		}
+		return result, fmt.Errorf("published review does not match the saved review identity")
 	}
 	if id == 0 {
 		if result.ObservedHeadSHA == "" && current.HeadSHA != result.HeadSHA {
@@ -311,6 +319,13 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 		if id <= 0 {
 			return result, fmt.Errorf("GitHub returned no published review ID")
 		}
+		if result.RoundID != 0 && recordReviewID != nil {
+			result.ReviewID = strconv.FormatInt(id, 10)
+			if err := recordReviewID(id); err != nil {
+				return result, fail("state_failed", "record published review identity: %v", err)
+			}
+			recordReviewID = nil
+		}
 	}
 	commentExpected := login == normalizeGitHubLogin(current.Author) || result.ObservedHeadSHA != ""
 	review, err := readPublishedReview(ctx, result, id, login, commentExpected)
@@ -330,6 +345,11 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 		}
 	}
 	result.ReviewID, result.ReviewURL = strconv.FormatInt(id, 10), review.URL
+	if result.RoundID != 0 && recordReviewID != nil && publication.PublishedReviewID == 0 {
+		if err := recordReviewID(id); err != nil {
+			return result, fail("state_failed", "record published review identity: %v", err)
+		}
+	}
 	result.Verdict = map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
 	if dismissedAfterPush {
 		result.Verdict = publication.Draft.Verdict
@@ -347,6 +367,9 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	}
 	if publication.ExistingReviewID == 0 {
 		if review.Body != publication.Draft.Body {
+			if result.RoundID != 0 && current.HeadSHA != result.HeadSHA {
+				return result, fail("review_changed", "published review body changed; reassess in a new round")
+			}
 			return result, fmt.Errorf("published review body differs from the saved publication")
 		}
 		if err := verifyPublishedComments(ctx, pr, id, publication.Draft.Comments, current.HeadSHA != result.HeadSHA); err != nil {
@@ -364,7 +387,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	return result, nil
 }
 
-func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expected []ReviewComment, preferOriginal ...bool) error {
+func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expected []ReviewComment, preferOriginal bool) error {
 	if len(expected) == 0 {
 		return nil
 	}
@@ -380,17 +403,16 @@ func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expe
 		return err
 	}
 	remaining := append([]ReviewComment(nil), expected...)
-	useOriginal := len(preferOriginal) != 0 && preferOriginal[0]
 	for _, page := range pages {
 		for _, wire := range page {
 			if wire.ReviewID != id {
 				continue
 			}
 			comment := wire.ReviewComment
-			if comment.Line == 0 || (useOriginal && wire.OriginalLine != 0) {
+			if comment.Line == 0 || (preferOriginal && wire.OriginalLine != 0) {
 				comment.Line = wire.OriginalLine
 			}
-			if comment.StartLine == 0 || (useOriginal && wire.OriginalStartLine != 0) {
+			if comment.StartLine == 0 || (preferOriginal && wire.OriginalStartLine != 0) {
 				comment.StartLine = wire.OriginalStartLine
 			}
 			found := false

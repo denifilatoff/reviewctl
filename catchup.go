@@ -70,14 +70,32 @@ func (s *Store) replacePreparedPublication(ctx context.Context, publication Publ
 	if err != nil {
 		return err
 	}
-	pr := publication.Attempt.PullRequest
-	_, err = s.db.ExecContext(ctx, `UPDATE review_publications SET payload = ?
-		WHERE provider = ? AND repository = ? AND change_number = ?`, string(payload), pr.Provider, pr.Repository, pr.Number)
-	return err
+	attempt := publication.Attempt
+	args := append([]any{string(payload)}, pullRequestKey(attempt.PullRequest)...)
+	changed, err := s.db.ExecContext(ctx, `UPDATE review_publications SET payload = ?
+		WHERE provider = ? AND repository = ? AND change_number = ?
+		AND json_extract(payload, '$.Attempt.round_key') = ? AND json_extract(payload, '$.Attempt.pass') = ?`,
+		append(args, attempt.RoundKey, attempt.Pass)...)
+	if err != nil {
+		return err
+	}
+	if count, err := changed.RowsAffected(); err != nil || count != 1 {
+		return fmt.Errorf("prepared publication update affected %d rows: %v", count, err)
+	}
+	return nil
 }
 
-func (s *Store) discardUnstartedPublication(ctx context.Context, pr PullRequest) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM review_publications
-		WHERE provider = ? AND repository = ? AND change_number = ?`, pr.Provider, pr.Repository, pr.Number)
-	return err
+func (s *Store) discardUnstartedPublication(ctx context.Context, attempt Attempt) error {
+	changed, err := s.db.ExecContext(ctx, `DELETE FROM review_publications
+		WHERE provider = ? AND repository = ? AND change_number = ?
+		AND json_extract(payload, '$.Attempt.round_key') = ? AND json_extract(payload, '$.Attempt.pass') = ?
+		AND json_extract(payload, '$.PublishedReviewID') IS NULL`,
+		append(pullRequestKey(attempt.PullRequest), attempt.RoundKey, attempt.Pass)...)
+	if err != nil {
+		return err
+	}
+	if count, err := changed.RowsAffected(); err != nil || count != 1 {
+		return fmt.Errorf("prepared publication removal affected %d rows: %v", count, err)
+	}
+	return nil
 }

@@ -1043,16 +1043,15 @@ repositories:
 	headChangeEnv := append(append([]string{}, env...),
 		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
 	result = runCLI(t, headChangeEnv, binary, "--json", "run")
-	if result.exitCode != 1 || !strings.Contains(result.stdout, `"code":"head_changed"`) {
+	if result.exitCode != 0 || result.object["status"] != "success" {
 		t.Fatalf("moving head result: %+v", result)
 	}
-	queue, history, err = store.Status(context.Background(), 1)
-	if err != nil || len(queue) != 1 || queue[0].Number != 7 || len(history) != 1 ||
-		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
+	queue, history, err = store.Status(context.Background(), 2)
+	const pushed = "fedcba9876543210fedcba9876543210fedcba98"
+	if err != nil || len(queue) != 0 || len(history) != 2 || history[0].Number != 7 ||
+		!history[0].Success || history[0].HeadSHA != pushed || history[0].Pass != 2 ||
+		history[1].RoundID != history[0].RoundID || history[1].ErrorCode != "catch_up" {
 		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
-	}
-	if _, err := os.Stat(reviewPath); !os.IsNotExist(err) {
-		t.Fatalf("moving-head review was published: %v", err)
 	}
 }
 

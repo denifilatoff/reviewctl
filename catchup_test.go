@@ -39,10 +39,10 @@ func TestRoundPublicationUsesReviewedCommitForStaleComment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, err := deliverPublication(ctx, cfg, publication); err == nil || result.ReviewID != "" {
+	if result, err := deliverPublication(ctx, cfg, publication, nil); err == nil || result.ReviewID != "" {
 		t.Fatalf("deliverPublication(outdated approval) = %+v, %v, want an error before any review was posted", result, err)
 	}
-	result, err := deliverPublication(ctx, cfg, publication.forObservedHead(observed.HeadSHA))
+	result, err := deliverPublication(ctx, cfg, publication.forObservedHead(observed.HeadSHA), nil)
 	if err != nil || !result.Success || result.Verdict != "COMMENT" || result.HeadSHA != publication.Attempt.HeadSHA {
 		t.Fatalf("deliverPublication(stale comment) = %+v, %v, want COMMENT on %s", result, err, publication.Attempt.HeadSHA)
 	}
@@ -105,7 +105,7 @@ func TestRoundPublicationLeavesLaterAuthorFeedbackOpen(t *testing.T) {
 	publication := catchUpPublication(pr, fakeGHThreads())
 	threadID := publication.Threads[0].ID
 	publication.Draft.Discussions = []DiscussionAction{{ThreadID: threadID, Action: "resolved_with_reply", Body: "Fix verified."}}
-	first, err := deliverPublication(ctx, cfg, publication)
+	first, err := deliverPublication(ctx, cfg, publication, nil)
 	if err == nil || first.ReviewID == "" {
 		t.Fatalf("deliverPublication(lost reply response) = %+v, %v, want interrupted publication after review POST", first, err)
 	}
@@ -121,7 +121,7 @@ func TestRoundPublicationLeavesLaterAuthorFeedbackOpen(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(temp, "published.threads.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := deliverPublication(ctx, cfg, publication)
+	result, err := deliverPublication(ctx, cfg, publication, nil)
 	if err != nil || !result.Success || !result.Recovered || len(result.DiscussionOutcomes) != 0 {
 		t.Fatalf("deliverPublication(after author feedback) = %+v, %v, want existing review and no verified discussion mutation", result, err)
 	}

@@ -422,7 +422,7 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	retirePass := (attempt.ErrorCode == "head_changed" || attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected") &&
 		(attempt.RoundID == 0 || attempt.ReviewID == "")
 	roundNeedsReassessment := attempt.RoundID != 0 && attempt.ReviewID != "" &&
-		(attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected")
+		(attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected" || attempt.ErrorCode == "review_changed")
 	if removeFromQueue || retirePass || roundNeedsReassessment {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM review_publications
 			WHERE provider = ? AND repository = ? AND change_number = ?`, attempt.Provider, attempt.Repository, attempt.Number); err != nil {
