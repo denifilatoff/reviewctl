@@ -9,7 +9,10 @@ import (
 )
 
 func discussionReplyBody(publication Publication, action DiscussionAction) string {
-	seed := reviewMarker(publication.Attempt.PullRequest, publication.Attempt.HeadSHA, publication.Attempt.SkillDigest) + publication.Attempt.StartedAt.String()
+	seed := publication.Attempt.publicationMarker()
+	if publication.Attempt.RoundID == 0 {
+		seed += publication.Attempt.StartedAt.String()
+	}
 	return action.Body + fmt.Sprintf("\n\n<!-- reviewctl:discussion:%x:%s -->", sha256.Sum256([]byte(seed)), action.ThreadID)
 }
 
@@ -44,11 +47,14 @@ func inspectPublicationDiscussion(publication Publication, action DiscussionActi
 	return resolved, replyID, nil
 }
 
-func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Publication) error {
+func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Publication) ([]DiscussionOutcome, error) {
+	if publication.Draft.FindingPublication != nil && len(publication.Draft.Discussions) == 0 {
+		return []DiscussionOutcome{}, nil
+	}
 	pr := publication.Attempt.PullRequest
 	threads, err := listGitHubReviewThreads(ctx, pr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	initial := make(map[string]githubReviewThread, len(publication.Threads))
 	currentThreads := make(map[string]githubReviewThread, len(threads))
@@ -64,15 +70,20 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 		if action.Action != "preserved" {
 			current, err = readGitHubReviewThread(ctx, action.ThreadID)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if _, err := resolvePublicationTarget(ctx, cfg, pr, publication.Attempt.HeadSHA); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		resolved, replyID, err := inspectPublicationDiscussion(publication, action, before, current)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if action.FindingID != "" && current.IsResolved && ((action.Action == "open_with_reply" &&
+			normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) || (action.Action == "resolved_with_reply" &&
+			(replyID == 0 || normalizeGitHubLogin(current.ResolvedBy) != publication.Login))) {
+			continue
 		}
 		outcome := DiscussionOutcome{ThreadID: action.ThreadID, Action: action.Action}
 		if action.Body != "" {
@@ -88,32 +99,36 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 						if lookupErr == nil {
 							_, created, inspectErr := inspectPublicationDiscussion(publication, action, before, after)
 							if inspectErr != nil {
-								return inspectErr
+								return nil, inspectErr
 							}
 							if created == 0 {
-								return fail("draft_rejected", "GitHub rejected the reply for discussion %s; reassess before retrying: %v", action.ThreadID, err)
+								return nil, fail("draft_rejected", "GitHub rejected the reply for discussion %s; reassess before retrying: %v", action.ThreadID, err)
 							}
 						}
 					}
-					return err
+					return nil, err
 				}
 				replyID = reply.ID
 				if replyID <= 0 {
-					return fmt.Errorf("GitHub returned no discussion reply ID")
+					return nil, fmt.Errorf("GitHub returned no discussion reply ID")
 				}
 				current, err = readGitHubReviewThread(ctx, action.ThreadID)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				if _, err := resolvePublicationTarget(ctx, cfg, pr, publication.Attempt.HeadSHA); err != nil {
-					return err
+					return nil, err
 				}
 				_, recovered, err := inspectPublicationDiscussion(publication, action, before, current)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				if recovered != replyID {
-					return fmt.Errorf("discussion reply %d readback did not match; retry delivery", replyID)
+					return nil, fmt.Errorf("discussion reply %d readback did not match; retry delivery", replyID)
+				}
+				if action.FindingID != "" && current.IsResolved && ((action.Action == "open_with_reply" &&
+					normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) || action.Action == "resolved_with_reply") {
+					continue
 				}
 			}
 			outcome.ReplyID = json.Number(strconv.FormatInt(replyID, 10))
@@ -127,28 +142,35 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 			var response struct{ Errors []struct{ Message string } }
 			if err := githubJSON(ctx, []string{"graphql"}, map[string]any{"query": query,
 				"variables": map[string]string{"id": action.ThreadID}}, &response); err != nil {
-				return err
+				return nil, err
 			}
 			if len(response.Errors) != 0 {
-				return fmt.Errorf("update review thread: %s", response.Errors[0].Message)
+				return nil, fmt.Errorf("update review thread: %s", response.Errors[0].Message)
 			}
 		}
 		outcomes = append(outcomes, outcome)
 	}
 	current, err := listGitHubReviewThreads(ctx, pr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, thread := range current {
 		currentThreads[thread.ID] = thread
 	}
 	for _, action := range publication.Draft.Discussions {
 		if _, _, err := inspectPublicationDiscussion(publication, action, initial[action.ThreadID], currentThreads[action.ThreadID]); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if err := validateDiscussionOutcomes(publication.Threads, current, publication.Login, outcomes); err != nil {
-		return fail("discussion_changed", "discussion synchronization readback: %v", err)
+	expected := publication.Threads
+	if publication.Draft.FindingPublication != nil {
+		expected = make([]githubReviewThread, 0, len(outcomes))
+		for _, outcome := range outcomes {
+			expected = append(expected, initial[outcome.ThreadID])
+		}
 	}
-	return nil
+	if err := validateDiscussionOutcomes(expected, current, publication.Login, outcomes); err != nil {
+		return nil, fail("discussion_changed", "discussion synchronization readback: %v", err)
+	}
+	return outcomes, nil
 }

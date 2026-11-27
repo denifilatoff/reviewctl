@@ -148,8 +148,7 @@ func controllerFindingThread(pr PullRequest, login string, thread githubReviewTh
 	if len(thread.Comments) == 0 || normalizeGitHubLogin(thread.Comments[0].Author) != login {
 		return false
 	}
-	markerScope := fmt.Sprintf("<!-- reviewctl:%s:%s#%d:", pr.Provider, pr.Repository, pr.Number)
-	return strings.Contains(thread.Comments[0].ReviewBody, markerScope)
+	return strings.Contains(thread.Comments[0].ReviewBody, reviewMarkerPrefix(pr))
 }
 
 func observeFindingThread(pr PullRequest, thread githubReviewThread) findingThread {
@@ -228,7 +227,8 @@ func (input FindingPass) instruction(inputPath string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf(`
-Read the finding registry snapshot at %q. Use its text and linked GitHub discussions as evidence.
+Finding registry snapshot: %s
+Read the finding registry snapshot. Use its text and linked GitHub discussions as evidence.
 Use the review scope specified for this pass. Assess every open or regressed finding in the registry. Revisit fixed
 or previously closed findings when the code or replies provide evidence of regression. Respect documented accepted risks.
 Use the locked skill's review.json format. Finding IDs in that file are pass-local until the controller reconciles them.

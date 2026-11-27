@@ -193,14 +193,7 @@ func (s *Store) recordFindingPublication(ctx context.Context, publication Public
 		return nil
 	}
 	attempt := publication.Attempt
-	markerScope := fmt.Sprintf("<!-- reviewctl:%s:%s#%d:", attempt.Provider, attempt.Repository, attempt.Number)
-	var reviewMarker string
-	if _, after, found := strings.Cut(publication.Draft.Body, markerScope); found {
-		text, _, complete := strings.Cut(after, " -->")
-		if complete {
-			reviewMarker = markerScope + text + " -->"
-		}
-	}
+	marker := attempt.publicationMarker()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -221,11 +214,11 @@ func (s *Store) recordFindingPublication(ctx context.Context, publication Public
 		}
 		var matching *githubReviewThread
 		for _, thread := range threads {
-			if reviewMarker == "" || !controllerFindingThread(attempt.PullRequest, publication.Login, thread) {
+			if !controllerFindingThread(attempt.PullRequest, publication.Login, thread) {
 				continue
 			}
 			root := thread.Comments[0]
-			if strings.Contains(root.ReviewBody, reviewMarker) && strings.HasSuffix(root.Body, findingMarker(id)) {
+			if strings.Contains(root.ReviewBody, marker) && strings.HasSuffix(root.Body, findingMarker(id)) {
 				if matching != nil {
 					return fmt.Errorf("published inline finding %s has multiple GitHub threads", id)
 				}

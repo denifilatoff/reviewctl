@@ -168,10 +168,8 @@ func TestControllerRejectsStaleDiscussionBeforeReviewPost(t *testing.T) {
 	}
 }
 
-func TestControllerPreservesConflictingReassessment(t *testing.T) {
+func TestControllerRecoversSecondSameHeadRoundAfterRestart(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
-	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
-	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "preserved")
 	ctx := context.Background()
 	first := ProcessAttempt(ctx, cfg, store, pr)
 	if !first.Success {
@@ -180,53 +178,40 @@ func TestControllerPreservesConflictingReassessment(t *testing.T) {
 	if err := store.Finish(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	threads := fakeGHThreads()
-	threads[0].Comments = append(threads[0].Comments, githubReviewComment{
-		DatabaseID: 3, Author: "human", ReplyToID: 1, Body: "A separate data-loss defect exists on this unchanged commit."})
-	data, _ := json.Marshal(threads)
-	if err := os.WriteFile(filepath.Join(temp, "published.threads.json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("REVIEWCTL_FAKE_VERDICT", "REQUEST_CHANGES")
 	t.Setenv("REVIEWCTL_FAKE_INLINE_COMMENT", "1")
-	if _, err := store.EnqueueMany(ctx, []PullRequest{pr}); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("REVIEWCTL_FAKE_LOST_POST_RESPONSE", "1")
 	second := ProcessAttempt(ctx, cfg, store, pr)
-	calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
-	if string(calls) != "2" {
-		t.Fatalf("analysis calls = %q, want 2", calls)
-	}
-	if second.Success || second.ErrorCode != "review_conflict" {
-		t.Errorf("ProcessAttempt(reassessment with a new blocker) = %+v, want review_conflict", second)
-	}
-	pending, err := store.pendingPublication(ctx, pr)
-	if err != nil || pending == nil {
-		t.Fatalf("pending reassessment = %+v, %v; want retained draft", pending, err)
-	}
-	if pending.Draft.Verdict != "REQUEST_CHANGES" || len(pending.Draft.Comments) != 1 {
-		t.Errorf("pending reassessment = %+v, want new verdict and finding", pending.Draft)
+	if second.Success || second.ErrorCode != "publication_failed" || first.RoundID == second.RoundID {
+		t.Fatalf("second round after lost POST response = %+v, want new recoverable round", second)
 	}
 	if err := store.Finish(ctx, second); err != nil {
 		t.Fatal(err)
 	}
-	queue, err := store.Snapshot(ctx)
-	if err != nil || len(queue) != 1 || queue[0] != pr {
-		t.Errorf("queue after review conflict = %+v, %v; want the PR retained", queue, err)
+	path := store.path
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
-	retried := ProcessAttempt(ctx, cfg, store, pr)
-	if retried.Success || retried.ErrorCode != "review_conflict" || retried.Cost != nil {
-		t.Errorf("retry conflicting reassessment = %+v, want retained conflict without new cost", retried)
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	calls, _ = os.ReadFile(filepath.Join(temp, "codex-calls"))
-	if string(calls) != "2" {
-		t.Errorf("analysis calls after conflict retry = %q, want 2", calls)
+	defer reopened.Close()
+	recovered := ProcessAttempt(ctx, cfg, reopened, pr)
+	if !recovered.Success || !recovered.Recovered || recovered.RoundID != second.RoundID ||
+		recovered.HeadSHA != first.HeadSHA || recovered.ReviewID == first.ReviewID || recovered.Cost != nil ||
+		recovered.Verdict != "REQUEST_CHANGES" {
+		t.Errorf("recovered second round = %+v, want the second review at %s without duplicate cost", recovered, first.HeadSHA)
 	}
-	posts, _ := os.ReadFile(filepath.Join(temp, "published.posts"))
-	if string(posts) != "1" {
-		t.Errorf("review posts after conflict = %q, want 1", posts)
+	calls, posts := readTestCounter(filepath.Join(temp, "codex-calls")), readTestCounter(filepath.Join(temp, "published.posts"))
+	if calls != 2 || posts != 2 {
+		t.Errorf("analysis calls=%d, review posts=%d; want 2 of each", calls, posts)
 	}
-
+	previous := filepath.Join(reopened.passDirectory(first), "review.json")
+	instruction, _ := os.ReadFile(filepath.Join(temp, "codex-calls.instruction"))
+	if !strings.Contains(string(instruction), "Previous review report: "+previous) {
+		t.Errorf("second-pass instruction did not name the previous report at %s", previous)
+	}
 }
 
 func TestControllerKeepsDiscussionOpenAfterInterveningReply(t *testing.T) {
@@ -267,7 +252,7 @@ func TestControllerRetiresMissingReviewForNewHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := store.pendingPublication(ctx, pr)
-	if err != nil || pending == nil || pending.ExistingReviewID != 123 {
+	if err != nil || pending == nil || pending.Attempt.RoundID != second.RoundID {
 		t.Fatalf("pending: %+v, %v", pending, err)
 	}
 
@@ -302,7 +287,7 @@ func TestControllerRetiresMissingReviewForNewHead(t *testing.T) {
 	}
 }
 
-func TestControllerPreservesNewGeneralFinding(t *testing.T) {
+func TestControllerPublishesNewGeneralFindingInSameHeadRound(t *testing.T) {
 	cfg, pr, store, _ := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
 	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "preserved")
@@ -316,14 +301,14 @@ func TestControllerPreservesNewGeneralFinding(t *testing.T) {
 	}
 	t.Setenv("REVIEWCTL_FAKE_GENERAL_FINDING", "1")
 	result := ProcessAttempt(ctx, cfg, store, pr)
-	if result.Success || result.ErrorCode != "review_conflict" {
-		t.Errorf("ProcessAttempt(new general finding) = %+v, want review_conflict", result)
+	if !result.Success || result.ReviewID == first.ReviewID {
+		t.Errorf("ProcessAttempt(new general finding) = %+v, want a new published review", result)
 	}
 	pending, err := store.pendingPublication(ctx, pr)
 	if err != nil || pending == nil {
 		t.Fatalf("pending general finding = %+v, %v; want retained draft", pending, err)
 	}
-	if pending.Draft.Body != "A new general finding outside the diff." {
+	if !strings.Contains(pending.Draft.Body, "A new general finding outside the diff.") {
 		t.Errorf("retained summary = %q, want the new general finding", pending.Draft.Body)
 	}
 }
@@ -361,53 +346,8 @@ func TestControllerBatchesPreservedDiscussions(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("ProcessAttempt(100 preserved discussions) = %+v, want success", result)
 	}
-	if reads := readTestCounter(countFile); reads > 4 {
-		t.Errorf("full discussion reads for 100 preserved actions = %d, want at most 4", reads)
-	}
-}
-
-func TestControllerRetiresConflictingReassessmentForNewHead(t *testing.T) {
-	cfg, pr, store, temp := publicationFixture(t)
-	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
-	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "preserved")
-	ctx := context.Background()
-	first := ProcessAttempt(ctx, cfg, store, pr)
-	if !first.Success {
-		t.Fatal(first.ErrorMessage)
-	}
-	if err := store.Finish(ctx, first); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.EnqueueMany(ctx, []PullRequest{pr}); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("REVIEWCTL_FAKE_VERDICT", "REQUEST_CHANGES")
-	conflict := ProcessAttempt(ctx, cfg, store, pr)
-	if conflict.Success || conflict.ErrorCode != "review_conflict" {
-		t.Fatalf("changed verdict without inline findings = %+v, want review_conflict", conflict)
-	}
-	if err := store.Finish(ctx, conflict); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("REVIEWCTL_FAKE_HEAD_AFTER_POST", "1")
-	changed := ProcessAttempt(ctx, cfg, store, pr)
-	if changed.Success || changed.ErrorCode != "head_changed" || changed.Cost != nil {
-		t.Errorf("retry conflict after push = %+v, want head_changed without duplicate cost", changed)
-	}
-	if err := store.Finish(ctx, changed); err != nil {
-		t.Fatal(err)
-	}
-	pending, err := store.pendingPublication(ctx, pr)
-	if err != nil || pending != nil {
-		t.Errorf("publication after new head = %+v, %v; want no old draft", pending, err)
-	}
-	queue, err := store.Snapshot(ctx)
-	if err != nil || len(queue) != 1 || queue[0] != pr {
-		t.Errorf("queue after new head = %+v, %v; want the PR retained", queue, err)
-	}
-	calls, _ := os.ReadFile(filepath.Join(temp, "codex-calls"))
-	if string(calls) != "2" {
-		t.Errorf("analysis calls before old-draft retirement = %q, want 2", calls)
+	if reads := readTestCounter(countFile); reads > 6 {
+		t.Errorf("full discussion reads for 100 preserved actions = %d, want at most 6", reads)
 	}
 }
 

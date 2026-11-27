@@ -992,8 +992,9 @@ repositories:
 		t.Fatalf("re-enqueue: %+v", result)
 	}
 	result = runCLI(t, env, binary, "--json", "run")
-	if result.exitCode != 0 || !strings.Contains(result.stdout, `"recovered":true`) {
-		t.Fatalf("marker recovery result: %+v", result)
+	if result.exitCode != 0 || !strings.Contains(result.stdout, `"recovered":false`) ||
+		readTestCounter(filepath.Join(temp, "published.posts")) != 2 {
+		t.Fatalf("same-head round result: %+v", result)
 	}
 
 	failedURL := "https://github.com/acme/service/pull/8"
@@ -1306,6 +1307,7 @@ func TestProcessAttemptRejectsMissingOwnedDiscussionOutcome(t *testing.T) {
 	t.Setenv("REVIEWCTL_FAKE_GIT_STATE", filepath.Join(temp, "git-fetch"))
 	t.Setenv("REVIEWCTL_FAKE_LOGIN", "reviewer")
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
+	t.Setenv("REVIEWCTL_FAKE_OMIT_FINDING_ASSESSMENTS", "1")
 
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	cfg := Config{
@@ -1340,7 +1342,7 @@ func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
 	}
 }
 
-func TestProcessAttemptRecoversWithoutAgentReportedState(t *testing.T) {
+func TestProcessAttemptPublishesASecondRoundOnTheSameHead(t *testing.T) {
 	temp := t.TempDir()
 	fakeBin := installProcessHelpers(t, temp)
 	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
@@ -1363,8 +1365,8 @@ func TestProcessAttemptRecoversWithoutAgentReportedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	result = ProcessAttempt(context.Background(), cfg, store, pr)
-	if !result.Success || !result.Recovered || result.Cost != nil {
-		t.Fatalf("controller recovery result: %+v", result)
+	if !result.Success || result.Recovered || result.RoundID != 2 || result.ReviewID == "123" {
+		t.Fatalf("same-head round = %+v, want a separate review", result)
 	}
 }
 
@@ -1654,8 +1656,17 @@ func helperGH(args []string) {
 		if len(parts) != 6 {
 			os.Exit(76)
 		}
-		review := submittedReview{ID: 123, Commit: request.Commit, Body: request.Body,
-			URL:   fmt.Sprintf("https://github.com/%s/%s/pull/%s#pullrequestreview-123", parts[1], parts[2], parts[4]),
+		previous, previousErr := os.ReadFile(state + ".review.json")
+		if previousErr == nil {
+			var saved submittedReview
+			if json.Unmarshal(previous, &saved) != nil ||
+				os.WriteFile(fmt.Sprintf("%s.review-%d.json", state, saved.ID), previous, 0o600) != nil {
+				os.Exit(76)
+			}
+		}
+		id := int64(123 + readTestCounter(state+".posts"))
+		review := submittedReview{ID: id, Commit: request.Commit, Body: request.Body,
+			URL:   fmt.Sprintf("https://github.com/%s/%s/pull/%s#pullrequestreview-%d", parts[1], parts[2], parts[4], id),
 			State: map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}[request.Event]}
 		review.User.Login = os.Getenv("REVIEWCTL_FAKE_LOGIN")
 		if review.User.Login == "" {
@@ -1667,11 +1678,24 @@ func helperGH(args []string) {
 			ReviewID int64 `json:"pull_request_review_id"`
 		}
 		var reviewComments []reviewComment
-		for _, comment := range request.Comments {
+		threads := fakeGHThreads()
+		for i, comment := range request.Comments {
 			reviewComments = append(reviewComments, reviewComment{comment, review.ID})
+			commentID := review.ID*100 + int64(i)
+			threads = append(threads, githubReviewThread{
+				ID: fmt.Sprintf("PRRT_inline_%d", commentID),
+				Comments: []githubReviewComment{{DatabaseID: commentID, Author: review.User.Login,
+					Body: comment.Body, ReviewBody: review.Body}},
+			})
+		}
+		if len(request.Comments) != 0 {
+			data, _ := json.Marshal(threads)
+			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
+				os.Exit(76)
+			}
 		}
 		comments, _ := json.Marshal([][]reviewComment{reviewComments})
-		for name, contents := range map[string][]byte{state: []byte("123"), state + ".review.json": encoded,
+		for name, contents := range map[string][]byte{state: []byte(strconv.FormatInt(id, 10)), state + ".review.json": encoded,
 			state + ".request.json": data, state + ".comments.json": comments,
 			state + ".posts": []byte(strconv.Itoa(readTestCounter(state+".posts") + 1))} {
 			if os.WriteFile(name, contents, 0o600) != nil {
@@ -1756,6 +1780,32 @@ func helperGH(args []string) {
 		os.Stdout.Write(data)
 		return
 	}
+	if len(args) == 4 && args[0] == "api" && strings.Contains(args[1], "/issues/") &&
+		strings.Contains(args[1], "/comments?per_page=100&since=") && args[2] == "--paginate" && args[3] == "--slurp" {
+		data, err := os.ReadFile(state + ".issue-comments.json")
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Print("[[]]")
+			return
+		}
+		if err != nil {
+			os.Exit(76)
+		}
+		os.Stdout.Write(data)
+		return
+	}
+	if len(args) == 4 && args[0] == "api" && strings.Contains(args[1], "/pulls/comments?per_page=100&since=") {
+		data, err := os.ReadFile(state + ".review-inputs.json")
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Print("[[]]")
+			return
+		}
+		if err != nil {
+			os.Exit(76)
+		}
+		os.Stdout.Write(data)
+		return
+	}
+
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
 		threads := fakeGHThreads()
 		if len(args) >= 4 && args[2] == "--input" {
@@ -1776,6 +1826,13 @@ func helperGH(args []string) {
 				os.Exit(76)
 			}
 			threads[target].IsResolved = !strings.Contains(request.Query, "unresolveReviewThread")
+			threads[target].ResolvedBy = ""
+			if threads[target].IsResolved {
+				threads[target].ResolvedBy = os.Getenv("REVIEWCTL_FAKE_LOGIN")
+				if threads[target].ResolvedBy == "" {
+					threads[target].ResolvedBy = "reviewer"
+				}
+			}
 			data, _ := json.Marshal(threads)
 			if os.WriteFile(state+".threads.json", data, 0o600) != nil {
 				os.Exit(76)
@@ -1783,8 +1840,17 @@ func helperGH(args []string) {
 			fmt.Print(`{"data":{}}`)
 			return
 		}
+		fields := make(map[string]string)
+		for _, arg := range args[2:] {
+			if name, value, ok := strings.Cut(arg, "="); ok {
+				fields[name] = value
+			}
+		}
 		nodes := []any{}
 		for _, thread := range threads {
+			if id := fields["id"]; id != "" && thread.ID != id {
+				continue
+			}
 			comments := []any{}
 			for _, comment := range thread.Comments {
 				var replyTo any
@@ -1792,31 +1858,27 @@ func helperGH(args []string) {
 					replyTo = map[string]int64{"databaseId": comment.ReplyToID}
 				}
 				comments = append(comments, map[string]any{"databaseId": comment.DatabaseID, "body": comment.Body,
-					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo})
+					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo,
+					"createdAt": comment.CreatedAt, "pullRequestReview": map[string]string{"body": comment.ReviewBody}})
 			}
-			nodes = append(nodes, map[string]any{
-				"id": thread.ID, "isResolved": thread.IsResolved,
-				"comments": map[string]any{
-					"nodes":    comments,
-					"pageInfo": map[string]bool{"hasNextPage": false},
-				},
-			})
+			commentCursor := ""
+			if fields["id"] != "" {
+				commentCursor = fields["after"]
+			}
+			nodes = append(nodes, map[string]any{"id": thread.ID, "isResolved": thread.IsResolved, "resolvedBy": map[string]string{"login": thread.ResolvedBy},
+				"comments": fakeGHReviewPage(comments, commentCursor)})
 		}
-		for _, arg := range args {
-			if id, ok := strings.CutPrefix(arg, "id="); ok {
-				if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
-					fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
-					os.Exit(1)
-				}
-				var node any
-				for _, candidate := range nodes {
-					if candidate.(map[string]any)["id"] == id {
-						node = candidate
-					}
-				}
-				json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
-				return
+		if fields["id"] != "" {
+			if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
+				fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
+				os.Exit(1)
 			}
+			var node any
+			if len(nodes) > 0 {
+				node = nodes[0]
+			}
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
+			return
 		}
 		if count := os.Getenv("REVIEWCTL_FAKE_THREAD_READS"); count != "" {
 			if os.WriteFile(count, []byte(strconv.Itoa(readTestCounter(count)+1)), 0o600) != nil {
@@ -1825,7 +1887,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
-				"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": false}},
+				"reviewThreads": fakeGHReviewPage(nodes, fields["after"]),
 			}}},
 		})
 		return
@@ -1841,7 +1903,20 @@ func helperGH(args []string) {
 		if err != nil {
 			os.Exit(76)
 		}
-		fmt.Printf("[[%s]]", data)
+		var reviews []json.RawMessage
+		previous, err := filepath.Glob(state + ".review-*.json")
+		if err != nil {
+			os.Exit(76)
+		}
+		for _, path := range previous {
+			old, err := os.ReadFile(path)
+			if err != nil {
+				os.Exit(76)
+			}
+			reviews = append(reviews, old)
+		}
+		reviews = append(reviews, data)
+		json.NewEncoder(os.Stdout).Encode([][]json.RawMessage{reviews})
 		return
 	}
 	for _, arg := range args {
@@ -1854,6 +1929,14 @@ func helperGH(args []string) {
 			var review submittedReview
 			if json.Unmarshal(data, &review) != nil {
 				os.Exit(76)
+			}
+			rawID := filepath.Base(arg)
+			if rawID != strconv.FormatInt(review.ID, 10) {
+				path = state + ".review-" + rawID + ".json"
+				data, err = os.ReadFile(path)
+				if err != nil || json.Unmarshal(data, &review) != nil {
+					os.Exit(76)
+				}
 			}
 			if len(args) > 2 && args[1] == "--method" && args[2] == "PUT" {
 				var body struct {
@@ -2048,11 +2131,15 @@ func fakeGHThreads() []githubReviewThread {
 		if json.Unmarshal(data, &threads) != nil {
 			os.Exit(76)
 		}
-		return threads
-	}
-	if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
+	} else if os.Getenv("REVIEWCTL_FAKE_OWNED_DISCUSSION") != "" {
 		threads = append(threads, githubReviewThread{ID: "PRRT_owned",
-			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer"}}})
+			Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer", Body: "Original finding."}}})
+	}
+	for _, thread := range threads {
+		if len(thread.Comments) != 0 && thread.Comments[0].Author == "reviewer" && thread.Comments[0].ReviewBody == "" {
+			thread.Comments[0].ReviewBody = reviewMarker(PullRequest{Provider: "github", Repository: "acme/service", Number: 7},
+				"0123456789abcdef0123456789abcdef01234567", "sha256:legacy")
+		}
 	}
 	return threads
 }
@@ -2236,35 +2323,44 @@ func helperCodex(args []string) {
 	draft := ReviewDraft{Provider: "github", Repository: fields["Repository"], Number: number,
 		HeadSHA: fields["Expected head"], SkillDigest: fields["Skill digest"], Verdict: verdict,
 		Body: "Review findings", Comments: []ReviewComment{}, Discussions: []DiscussionAction{}}
-	if action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION"); action != "" {
-		body := ""
-		if strings.HasSuffix(action, "_with_reply") {
-			body = "Verified the updated implementation."
-		}
-		var owned []string
-		if json.Unmarshal([]byte(fields["Pre-existing owned discussion thread IDs"]), &owned) != nil {
+	var findings []map[string]any
+	if snapshot := fields["Finding registry snapshot"]; snapshot != "" {
+		var input FindingPass
+		data, err := os.ReadFile(snapshot)
+		if err != nil || json.Unmarshal(data, &input) != nil {
 			os.Exit(95)
 		}
-		for _, id := range owned {
-			draft.Discussions = append(draft.Discussions, DiscussionAction{ThreadID: id, Action: action, Body: body})
-		}
-	}
-	if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
+		findings = helperFindingAssessments(&draft, input)
+	} else if os.Getenv("REVIEWCTL_FAKE_INLINE_COMMENT") != "" {
 		draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: "A finding."})
 	}
 	if head := os.Getenv("REVIEWCTL_FAKE_RECEIPT_HEAD"); head != "" {
 		draft.HeadSHA = head
 	}
 	data, _ := json.Marshal(draft)
-	if os.Getenv("REVIEWCTL_FAKE_GENERAL_FINDING") != "" {
-		var wire map[string]any
-		_ = json.Unmarshal(data, &wire)
-		wire["new_findings"] = true
-		wire["body"] = "A new general finding outside the diff."
-		data, _ = json.Marshal(wire)
-	}
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
+	}
+	if path := fields["Review report path"]; path != "" {
+		reportVerdict := strings.ToLower(draft.Verdict)
+		if reportVerdict == "comment" {
+			reportVerdict = "approve"
+		}
+		report, _ := json.Marshal(map[string]any{
+			"schema_version": 1, "target": map[string]string{"platform": "github", "url": fields["Pull request URL"]},
+			"revision": map[string]string{"base": "base", "head": draft.HeadSHA}, "result": reportVerdict, "findings": findings,
+		})
+		evidence := fields["Evidence directory"]
+		if os.WriteFile(path, report, 0o600) != nil || os.MkdirAll(evidence, 0o700) != nil ||
+			os.WriteFile(filepath.Join(evidence, "verification.txt"), []byte(draft.HeadSHA), 0o600) != nil ||
+			os.WriteFile(filepath.Join(filepath.Dir(path), "axis.json"), []byte("{}"), 0o600) != nil {
+			os.Exit(95)
+		}
+	}
+	if commands := os.Getenv("REVIEWCTL_FAKE_COMMAND_AFTER_CODEX"); commands != "" {
+		if os.WriteFile(os.Getenv("REVIEWCTL_FAKE_STATE")+".issue-comments.json", []byte(commands), 0o600) != nil {
+			os.Exit(95)
+		}
 	}
 	if jsonMode {
 		fmt.Println(`{"type":"thread.started","thread_id":"fake-root"}`)
@@ -2272,4 +2368,52 @@ func helperCodex(args []string) {
 	} else {
 		os.Stdout.Write(data)
 	}
+}
+
+func helperFindingAssessments(draft *ReviewDraft, input FindingPass) []map[string]any {
+	findings := []map[string]any{}
+	draft.FindingAssessments = []FindingAssessment{}
+	action := os.Getenv("REVIEWCTL_FAKE_DISCUSSION_ACTION")
+	knownTitles := make(map[string]bool)
+	for _, entry := range input.Registry.Findings {
+		knownTitles[entry.Title] = true
+		if os.Getenv("REVIEWCTL_FAKE_OMIT_FINDING_ASSESSMENTS") != "" {
+			continue
+		}
+		assessment := FindingAssessment{KnownID: entry.ID, Reason: "Verified the updated implementation."}
+		switch {
+		case action == "open_with_reply" && (entry.Status == findingFixed || entry.Status == findingRegression):
+			assessment.Status = findingRegression
+		case entry.Status == findingOpen || entry.Status == findingRegression:
+			assessment.Status = findingOpen
+			if strings.HasPrefix(action, "resolved") {
+				assessment.Status = findingFixed
+			}
+		default:
+			continue
+		}
+		draft.FindingAssessments = append(draft.FindingAssessments, assessment)
+	}
+	for _, newFinding := range []struct {
+		flag, title string
+		inline      bool
+	}{
+		{"REVIEWCTL_FAKE_INLINE_COMMENT", "A finding.", true},
+		{"REVIEWCTL_FAKE_GENERAL_FINDING", "A new general finding outside the diff.", false},
+	} {
+		if os.Getenv(newFinding.flag) == "" || knownTitles[newFinding.title] {
+			continue
+		}
+		id := findingID(len(findings) + 1)
+		findings = append(findings, map[string]any{"id": id, "title": newFinding.title, "kind": "defect",
+			"severity": "major", "confidence": "high", "axis": "correctness", "location": nil,
+			"problem": newFinding.title, "proposed_solution": "Validate the input."})
+		assessment := FindingAssessment{ReportID: id, Status: findingOpen, Reason: newFinding.title}
+		if newFinding.inline {
+			draft.Comments = append(draft.Comments, ReviewComment{Path: "main.go", Line: 12, Side: "RIGHT", Body: newFinding.title})
+			assessment.Comment = len(draft.Comments)
+		}
+		draft.FindingAssessments = append(draft.FindingAssessments, assessment)
+	}
+	return findings
 }
