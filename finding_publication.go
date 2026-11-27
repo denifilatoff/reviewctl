@@ -95,7 +95,7 @@ func (entry *findingRecord) assess(attempt Attempt, assessment FindingAssessment
 		if entry.Status == findingFixed {
 			return fmt.Errorf("finding %s requires confirmed regression after a verified fix", entry.ID)
 		}
-		if entry.Status == findingRegression || entry.Status == findingAccepted || entry.Status == findingWithdrawn {
+		if entry.Status == findingRegression || entry.Status == findingAccepted {
 			status = entry.Status
 		}
 	case findingRegression:
@@ -253,6 +253,7 @@ func (s *Store) recordFindingPublication(ctx context.Context, publication Public
 		if action.Action == "resolved_with_reply" && current.Resolved && current.ResolvedBy == publication.Login &&
 			found && outcome.Action == action.Action && outcome.ReplyID != "" {
 			current.ClosedByController = true
+			current.ClosureVerifiedSHA = action.VerifiedSHA
 		}
 		if action.Action == "open_with_reply" && !current.Resolved && found && outcome.Action == action.Action && outcome.ReplyID != "" {
 			key := "regressed:" + entry.EvidenceKey

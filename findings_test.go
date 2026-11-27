@@ -145,6 +145,7 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 	threads[0].IsResolved, threads[0].ResolvedBy = true, "reviewer"
 	threads[1].IsResolved, threads[1].ResolvedBy = true, "author"
 	published := Publication{Attempt: attempt, Draft: draft, Login: "reviewer"}
+	published.Attempt.HeadSHA = "later-publication-head"
 	result := attempt
 	result.DiscussionOutcomes = []DiscussionOutcome{{ThreadID: "controller", Action: "resolved_with_reply", ReplyID: "123"}}
 	if err := store.recordFindingPublication(ctx, published, result, threads); err != nil {
@@ -154,6 +155,9 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 	input, err = store.prepareFindingPass(ctx, attempt, threads, "reviewer")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if closure := input.Registry.byID("F1").Thread; !closure.ClosedByController || closure.ClosureVerifiedSHA != "verified-fix" {
+		t.Errorf("controller closure = %+v, want the verified fix SHA", closure)
 	}
 	writeFindingTestReport(t, report, attempt, `[]`, `[]`)
 	draft = findingTestDraft(

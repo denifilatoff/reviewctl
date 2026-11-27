@@ -134,6 +134,9 @@ func (r *findingReport) reconcileRecord(oldID string, finding *findingRecord) er
 		return err
 	}
 	record["id"], _ = json.Marshal(finding.ID)
+	if finding.Thread != nil {
+		record["prior_thread"], _ = json.Marshal(finding.Thread.URL)
+	}
 	var err error
 	r.findings[key.index], err = json.Marshal(record)
 	if err == nil {
@@ -192,7 +195,8 @@ func loadRecordedFindingPass(ctx context.Context, q interface {
 		return nil, err
 	}
 	if head != attempt.HeadSHA {
-		return nil, fmt.Errorf("round %d pass %d finding record belongs to %s, not %s", attempt.RoundID, attempt.Pass, head, attempt.HeadSHA)
+		return nil, fmt.Errorf("round %d pass %d expects %s but the saved findings are pinned to %s",
+			attempt.RoundID, attempt.Pass, attempt.HeadSHA, head)
 	}
 	var saved recordedFindingPass
 	if err := json.Unmarshal(raw, &saved); err != nil {
@@ -238,11 +242,15 @@ func (s *Store) recordFindingPass(ctx context.Context, attempt Attempt, input Fi
 		}
 		report, err := readFindingReport(reportPath, attempt, draft.Verdict)
 		if err != nil {
-			return err
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				return err
+			}
+			return fail("receipt_invalid", "%v", err)
 		}
 		prepared, resolved, err := applyFindingAssessments(attempt, input, &registry, report, *draft)
 		if err != nil {
-			return err
+			return fail("receipt_invalid", "%v", err)
 		}
 		saved = &recordedFindingPass{Report: resolved, Draft: prepared}
 		raw, err := json.Marshal(saved)
