@@ -109,11 +109,8 @@ func TestLegacyFindingsMigrateOnlyManagedOpenThreads(t *testing.T) {
 		FindingAssessment{KnownID: "F1", Status: findingOpen, Reason: "The route remains available."},
 		FindingAssessment{LegacyThreadID: "managed-closed", ReportID: "F1", Status: findingRegression, Reason: "An equivalent route returned."},
 	)
-	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err != nil {
-		t.Fatal(err)
-	}
-	if len(draft.Discussions) != 0 || !strings.Contains(draft.Body, "[F2]("+attempt.URL+"#discussion_r42) still applies") {
-		t.Errorf("review = %+v, want one discrepancy for F2 and no human-thread mutations", draft)
+	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err == nil {
+		t.Fatal("accepted a new finding for a closed legacy thread")
 	}
 }
 
@@ -134,13 +131,13 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 	}
 	draft := findingTestDraft(
 		FindingAssessment{KnownID: "F1", Status: findingFixed, Reason: "The first path checks its input."},
-		FindingAssessment{KnownID: "F2", Status: findingFixed, Reason: "The second path checks its input."},
+		FindingAssessment{KnownID: "F2", Status: findingOpen, Reason: "The second path remains reachable."},
 	)
 	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err != nil {
 		t.Fatal(err)
 	}
-	if len(draft.Discussions) != 2 || draft.Discussions[0].VerifiedSHA != "verified-fix" {
-		t.Fatalf("fixed actions = %+v, want two actions with the original verification SHA", draft.Discussions)
+	if len(draft.Discussions) != 1 || draft.Discussions[0].VerifiedSHA != "verified-fix" {
+		t.Fatalf("fixed actions = %+v, want a single action with the original verification SHA", draft.Discussions)
 	}
 	threads[0].IsResolved, threads[0].ResolvedBy = true, "reviewer"
 	threads[1].IsResolved, threads[1].ResolvedBy = true, "author"
@@ -164,6 +161,10 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 		FindingAssessment{KnownID: "F1", Status: findingRegression, Reason: "The first input check was removed."},
 		FindingAssessment{KnownID: "F2", Status: findingRegression, Reason: "The second input check was removed.", EvidenceKey: "second-input-removed"},
 	)
+	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err == nil {
+		t.Fatal("accepted reassessment of a manually resolved finding")
+	}
+	draft.FindingAssessments = draft.FindingAssessments[:1]
 	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err != nil {
 		t.Fatal(err)
 	}
@@ -171,14 +172,17 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 		got[0].ExpectedResolver != "reviewer" || got[0].VerifiedSHA != "regression" {
 		t.Errorf("regression actions = %+v, want only a controller reopen verified at regression", got)
 	}
-	if !strings.Contains(draft.Body, "[F2]("+attempt.URL+"#discussion_r22)") {
-		t.Errorf("short result = %q, want one discrepancy linked to the human-closed thread", draft.Body)
+	if strings.Contains(draft.Body, "F2") {
+		t.Errorf("short result = %q, unexpected reference to declined finding", draft.Body)
 	}
 	published = Publication{Attempt: attempt, Draft: draft, Login: "reviewer"}
 	if err := store.recordFindingPublication(ctx, published, attempt, threads); err != nil {
 		t.Fatal(err)
 	}
 	attempt.RoundID = 3
+	threads[1].Comments = append(threads[1].Comments, githubReviewComment{
+		DatabaseID: 23, Author: "author", ReplyToID: 22, Body: "This is the intended behavior.",
+	})
 	input, err = store.prepareFindingPass(ctx, attempt, threads, "reviewer")
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +190,6 @@ func TestFindingThreadDecisionsPreserveHumanClosureAndReopenControllerClosure(t 
 	writeFindingTestReport(t, report, attempt, `[]`, `[]`)
 	draft = findingTestDraft(
 		FindingAssessment{KnownID: "F1", Status: findingRegression, Reason: "The first input check was removed."},
-		FindingAssessment{KnownID: "F2", Status: findingRegression, Reason: "The second input check remains absent.", EvidenceKey: "second-input-removed"},
 	)
 	if err := store.recordFindingPass(ctx, attempt, input, report, &draft); err != nil {
 		t.Fatal(err)
