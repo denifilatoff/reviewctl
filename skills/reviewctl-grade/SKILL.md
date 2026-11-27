@@ -25,8 +25,7 @@ ReviewCTL handles delivery.
 
 - Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
   any publication or discussion actions.
-- Include each verified new finding once. Keep major, minor, nit, and question labels. Use inline comments for
-  locations inside a diff hunk, mapping `new` to `RIGHT` and `old` to `LEFT`. Put other findings in the summary.
-- Use previous findings and the delivery skill's discussion rules to propose actions only for the thread IDs
-  listed by the controller. If evidence is missing, preserve the thread. Keep findings tied to such threads in
-  their discussion actions.
+- Record each verified finding once in `review.json`. Keep major, minor, nit, and question labels. For new findings
+  with an inline location in the pinned PR diff, map `new` to `RIGHT` and `old` to `LEFT`.
+- Use the controller's finding registry and assessment contract to report what happened to prior findings. Include
+  the evidence for each status. ReviewCTL assigns stable IDs and decides which discussion actions to take.

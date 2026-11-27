@@ -10,30 +10,35 @@ import (
 )
 
 func TestControllerReopensResolvedDiscussion(t *testing.T) {
-	cfg, pr, store, temp := publicationFixture(t)
+	cfg, pr, store, _ := publicationFixture(t)
+	ctx := context.Background()
+	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
+	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved_with_reply")
+	first := ProcessAttempt(ctx, cfg, store, pr)
+	if !first.Success {
+		t.Fatalf("initial fix review = %+v, want success", first)
+	}
+	if err := store.Finish(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueMany(ctx, []PullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "open_with_reply")
 	t.Setenv("REVIEWCTL_FAKE_VERDICT", "REQUEST_CHANGES")
-	threads := []githubReviewThread{{ID: "PRRT_owned", IsResolved: true,
-		Comments: []githubReviewComment{{DatabaseID: 1, Author: "reviewer", Body: "Original finding."}}}}
-	data, err := json.Marshal(threads)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(temp, "published.threads.json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	result := ProcessAttempt(context.Background(), cfg, store, pr)
+	result := ProcessAttempt(ctx, cfg, store, pr)
 	if !result.Success || result.Verdict != "REQUEST_CHANGES" {
 		t.Fatalf("ProcessAttempt(reopen resolved discussion) = %+v, want successful review", result)
 	}
 	current := fakeGHThreads()
-	if len(current) != 1 || current[0].IsResolved || len(current[0].Comments) != 2 {
-		t.Fatalf("reopened discussion = %+v, want open with exactly one reply", current)
+	if len(current) != 1 || current[0].IsResolved || len(current[0].Comments) != 3 {
+		t.Fatalf("reopened discussion = %+v, want open with a fix reply and a regression reply", current)
 	}
-	reply := current[0].Comments[1]
+	reply := current[0].Comments[2]
 	if reply.Author != "reviewer" || reply.ReplyToID != 1 ||
-		!strings.HasPrefix(reply.Body, "Verified the updated implementation.\n\n<!-- reviewctl:discussion:") {
-		t.Errorf("reopening reply = %+v, want the drafted reply addressed to the owned root", reply)
+		!strings.HasPrefix(reply.Body, "F1 reproduced at `"+result.HeadSHA+"`.") ||
+		!strings.Contains(reply.Body, "<!-- reviewctl:discussion:") {
+		t.Errorf("reopening reply = %+v, want the regression evidence addressed to the owned root", reply)
 	}
 }
 

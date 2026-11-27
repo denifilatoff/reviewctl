@@ -87,10 +87,17 @@ calculator version, calculation time, the report, and any accounting error. `doc
 
 ## Review publication and retries
 
-Codex prepares a short summary, inline findings, and actions for existing owned discussions. ReviewCTL saves the
-verified report and its evidence before publishing. Each round has its own publication marker, so a new round on the
-same commit can publish a new result. After `publication_failed`, the next `run` resumes the saved round and recovers
-the existing review when GitHub already accepted it.
+Codex prepares a short summary and reports which findings still apply at the reviewed SHA. ReviewCTL assigns each
+finding a stable ID such as `F3` within its PR and saves the verified report and evidence before publishing. Each round
+has its own publication marker, so a new round on the same commit can publish a new result. After
+`publication_failed`, the next `run` resumes the saved round and recovers the existing review when GitHub already
+accepted it.
+
+ReviewCTL links existing open findings to their original discussions. It closes an owned discussion after a verified
+fix and records the fix's verification SHA. If a finding regresses, ReviewCTL can reopen a discussion that it closed.
+Human closures, closures with unknown provenance, and accepted risks stay in effect. If a closed discussion conflicts
+with the review's evidence, the short result links to the discussion. A later result repeats the discrepancy only
+when there is new evidence.
 
 `draft_rejected` means GitHub returned a request validation error and readback confirmed that the review or discussion
 reply was not created. ReviewCTL retires that plan and supplies the validation error to the next Codex attempt for
@@ -203,6 +210,9 @@ The state directory also holds the PR history at `reviews/github/<owner>/<repo>/
 contains the reviewed SHA and prepared draft in `pass.json`, the skill report in `review.json`, any referenced evidence
 under `evidence/`, and publication outcomes under `outcomes/` once delivery is attempted. A later pass receives the
 previous report path and the PR history directory.
+
+The SQLite finding registry records the status, verification history, linked discussion, and closure information for
+each finding. The saved `review.json` files use the same IDs across passes.
 
 ```shell
 reviewctl status

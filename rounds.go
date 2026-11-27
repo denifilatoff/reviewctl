@@ -82,30 +82,6 @@ func (s *Store) previousReviewPass(attempt Attempt) (*Publication, error) {
 	return nil, nil
 }
 
-func (s *Store) saveRoundPass(publication Publication, artifacts string) error {
-	path := s.passDirectory(publication.Attempt)
-	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return err
-	}
-	stage, err := os.MkdirTemp(parent, ".pass-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(stage)
-	if err := copyReviewArtifacts(artifacts, stage); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(publication, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(stage, "pass.json"), raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(stage, path)
-}
-
 func copyReviewArtifacts(source, destination string) error {
 	info, err := os.Lstat(source)
 	if err != nil {

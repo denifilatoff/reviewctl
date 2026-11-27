@@ -15,7 +15,9 @@ vet:
 
 apm-check:
 	@install_dir="$$(mktemp -d)"; trap 'rm -rf "$$install_dir"' EXIT; \
-		apm install --frozen --root "$$install_dir" --target codex
+		apm install --frozen --root "$$install_dir" --target codex && \
+		REVIEWCTL_LOCKED_SCHEMA="$$install_dir/.agents/skills/review-delivery/schema/review.schema.json" \
+		go test -count=1 -run '^TestLockedSkillFindingIDCompatibility$$' .
 
 ci: fmt vet test build apm-check
 

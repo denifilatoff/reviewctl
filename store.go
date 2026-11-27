@@ -119,6 +119,8 @@ func OpenStore(path string) (*Store, error) {
 			comment_id INTEGER NOT NULL,
 			PRIMARY KEY(provider, repository, change_number, source, comment_id)
 		)`,
+		findingRegistryTable,
+		findingPassesTable,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,

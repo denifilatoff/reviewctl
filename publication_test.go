@@ -61,7 +61,7 @@ func TestControllerPublishesSignedDraft(t *testing.T) {
 		t.Fatalf("initial controller POST = %s, %v", data, err)
 	}
 	if len(request.Comments) != 1 || request.Comments[0].Path != "main.go" || request.Comments[0].Line != 12 ||
-		request.Comments[0].Side != "RIGHT" || request.Comments[0].Body != "A finding." {
+		request.Comments[0].Side != "RIGHT" || request.Comments[0].Body != "**F1** A finding.\n\n<!-- reviewctl:finding:F1 -->" {
 		t.Fatalf("inline findings = %+v", request.Comments)
 	}
 }
@@ -251,7 +251,7 @@ func TestControllerReassessesDiscussionAfterHumanReply(t *testing.T) {
 func TestControllerKeepsHumanResolutionDuringReplyRetry(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_OWNED_DISCUSSION", "1")
-	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "open_with_reply")
+	t.Setenv("REVIEWCTL_FAKE_DISCUSSION_ACTION", "resolved_with_reply")
 	t.Setenv("REVIEWCTL_FAKE_LOST_REPLY_RESPONSE", "1")
 	ctx := context.Background()
 	first := ProcessAttempt(ctx, cfg, store, pr)
@@ -260,12 +260,13 @@ func TestControllerKeepsHumanResolutionDuringReplyRetry(t *testing.T) {
 	}
 	threads := fakeGHThreads()
 	threads[0].IsResolved = true
+	threads[0].ResolvedBy = "dependabot[bot]"
 	data, _ := json.Marshal(threads)
 	if err := os.WriteFile(filepath.Join(temp, "published.threads.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	second := ProcessAttempt(ctx, cfg, store, pr)
-	if second.Success || second.ErrorCode != "discussion_changed" || !fakeGHThreads()[0].IsResolved {
+	if !second.Success || !second.Recovered || !fakeGHThreads()[0].IsResolved {
 		t.Fatalf("human resolution was overwritten: %+v", second)
 	}
 }

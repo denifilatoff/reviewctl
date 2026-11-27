@@ -15,16 +15,18 @@ import (
 )
 
 type ReviewDraft struct {
-	Provider    string             `json:"provider"`
-	Repository  string             `json:"repository"`
-	Number      int64              `json:"number"`
-	HeadSHA     string             `json:"head_sha"`
-	SkillDigest string             `json:"skill_digest"`
-	Verdict     string             `json:"verdict"`
-	Body        string             `json:"body"`
-	Comments    []ReviewComment    `json:"comments"`
-	Discussions []DiscussionAction `json:"discussions"`
-	NewFindings bool               `json:"new_findings,omitempty"`
+	Provider           string              `json:"provider"`
+	Repository         string              `json:"repository"`
+	Number             int64               `json:"number"`
+	HeadSHA            string              `json:"head_sha"`
+	SkillDigest        string              `json:"skill_digest"`
+	Verdict            string              `json:"verdict"`
+	Body               string              `json:"body"`
+	Comments           []ReviewComment     `json:"comments"`
+	Discussions        []DiscussionAction  `json:"discussions"`
+	NewFindings        bool                `json:"new_findings,omitempty"`
+	FindingAssessments []FindingAssessment `json:"finding_assessments"`
+	FindingPublication *FindingPublication `json:"finding_publication,omitempty"`
 }
 
 type ReviewComment struct {
@@ -37,9 +39,12 @@ type ReviewComment struct {
 }
 
 type DiscussionAction struct {
-	ThreadID string `json:"thread_id"`
-	Action   string `json:"action"`
-	Body     string `json:"body,omitempty"`
+	ThreadID         string `json:"thread_id"`
+	Action           string `json:"action"`
+	Body             string `json:"body,omitempty"`
+	FindingID        string `json:"finding_id,omitempty"`
+	VerifiedSHA      string `json:"verified_sha,omitempty"`
+	ExpectedResolver string `json:"expected_resolver,omitempty"`
 }
 
 type Publication struct {
@@ -76,6 +81,9 @@ func readDraft(filePath string) (ReviewDraft, error) {
 }
 
 func validateDraft(draft ReviewDraft, attempt Attempt, owned []string, selfAuthored bool) error {
+	if draft.FindingPublication != nil || strings.Contains(draft.Body, signatureEnd) {
+		return fmt.Errorf("review draft includes controller finding publication data")
+	}
 	if draft.Provider != attempt.Provider || strings.ToLower(draft.Repository) != attempt.Repository ||
 		draft.Number != attempt.Number || draft.HeadSHA != attempt.HeadSHA || draft.SkillDigest != attempt.SkillDigest {
 		return fmt.Errorf("review draft scope does not match the pinned attempt")
@@ -121,6 +129,9 @@ func validateDraft(draft ReviewDraft, attempt Attempt, owned []string, selfAutho
 		seen[id] = false
 	}
 	for _, action := range draft.Discussions {
+		if action.FindingID != "" || action.VerifiedSHA != "" || action.ExpectedResolver != "" {
+			return fmt.Errorf("review draft includes controller discussion action data")
+		}
 		if visited, exists := seen[action.ThreadID]; !exists || visited {
 			return fmt.Errorf("discussion action does not match an owned discussion")
 		}

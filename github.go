@@ -52,13 +52,17 @@ type githubReviewComment struct {
 type githubReviewThread struct {
 	ID         string
 	IsResolved bool
+	ResolvedBy string
 	Comments   []githubReviewComment
 }
 
 type githubReviewThreadWire struct {
-	ID         string                              `json:"id"`
-	IsResolved *bool                               `json:"isResolved"`
-	Comments   githubPage[githubReviewCommentWire] `json:"comments"`
+	ID         string `json:"id"`
+	IsResolved *bool  `json:"isResolved"`
+	ResolvedBy struct {
+		Login string `json:"login"`
+	} `json:"resolvedBy"`
+	Comments githubPage[githubReviewCommentWire] `json:"comments"`
 }
 
 type githubReviewCommentWire struct {
@@ -106,11 +110,11 @@ func (page githubPage[T]) nextCursor(seen map[string]bool) (string, error) {
 const reviewCommentFields = `nodes{databaseId author{login} replyTo{databaseId} body createdAt pullRequestReview{body}} pageInfo{hasNextPage endCursor}`
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String){
 	repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){
-		nodes{id isResolved comments(first:100){` + reviewCommentFields + `}} pageInfo{hasNextPage endCursor}
+		nodes{id isResolved resolvedBy{login} comments(first:100){` + reviewCommentFields + `}} pageInfo{hasNextPage endCursor}
 	}}}
 }`
 const reviewThreadQuery = `query($id:ID!,$after:String){
-	node(id:$id){... on PullRequestReviewThread{id isResolved comments(first:100,after:$after){` + reviewCommentFields + `}}}
+	node(id:$id){... on PullRequestReviewThread{id isResolved resolvedBy{login} comments(first:100,after:$after){` + reviewCommentFields + `}}}
 }`
 
 func listGitHubReviewThreads(ctx context.Context, pr PullRequest) ([]githubReviewThread, error) {
@@ -224,7 +228,7 @@ func completeGitHubReviewThread(ctx context.Context, item githubReviewThreadWire
 	if item.ID == "" || item.IsResolved == nil || len(item.Comments.Nodes) == 0 {
 		return githubReviewThread{}, fail("github_failed", "GitHub returned an incomplete review thread %q", item.ID)
 	}
-	thread := githubReviewThread{ID: item.ID, IsResolved: *item.IsResolved}
+	thread := githubReviewThread{ID: item.ID, IsResolved: *item.IsResolved, ResolvedBy: normalizeGitHubLogin(item.ResolvedBy.Login)}
 	seenCursors := make(map[string]bool)
 	seenComments := make(map[int64]bool)
 	for {
@@ -253,7 +257,7 @@ func completeGitHubReviewThread(ctx context.Context, item githubReviewThreadWire
 		if err != nil {
 			return githubReviewThread{}, err
 		}
-		if *item.IsResolved != thread.IsResolved {
+		if *item.IsResolved != thread.IsResolved || normalizeGitHubLogin(item.ResolvedBy.Login) != thread.ResolvedBy {
 			return githubReviewThread{}, fail("discussion_changed", "review thread %s changed state during pagination; reassess before writing", thread.ID)
 		}
 	}

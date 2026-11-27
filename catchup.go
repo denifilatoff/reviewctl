@@ -57,6 +57,11 @@ func (publication Publication) withUnanchoredFindings() Publication {
 	before, after, _ := strings.Cut(publication.Draft.Body, marker)
 	publication.Draft.Body = strings.TrimSpace(before) + "\n\n" + strings.TrimSpace(locations.String()) + "\n\n" + marker + after
 	publication.Draft.Comments = []ReviewComment{}
+	if publication.Draft.FindingPublication != nil {
+		metadata := *publication.Draft.FindingPublication
+		metadata.Inline = nil
+		publication.Draft.FindingPublication = &metadata
+	}
 	return publication
 }
 

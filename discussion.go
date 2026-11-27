@@ -65,6 +65,9 @@ func (publication Publication) receivedDiscussionFeedback(before, current github
 }
 
 func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Publication) ([]DiscussionOutcome, error) {
+	if publication.Draft.FindingPublication != nil && len(publication.Draft.Discussions) == 0 {
+		return []DiscussionOutcome{}, nil
+	}
 	pr := publication.Attempt.PullRequest
 	threads, err := listGitHubReviewThreads(ctx, pr)
 	if err != nil {
@@ -98,6 +101,13 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 		resolved, replyID, err := inspectPublicationDiscussion(publication, action, before, current)
 		if err != nil {
 			return nil, err
+		}
+		if action.FindingID != "" && ((action.Action == "open_with_reply" &&
+			((current.IsResolved && normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) ||
+				(!current.IsResolved && replyID == 0))) || (action.Action == "resolved_with_reply" && current.IsResolved &&
+			(replyID == 0 || normalizeGitHubLogin(current.ResolvedBy) != publication.Login))) {
+			deferred[action.ThreadID] = true
+			continue
 		}
 		outcome := DiscussionOutcome{ThreadID: action.ThreadID, Action: action.Action}
 		if action.Body != "" {
@@ -147,6 +157,11 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 				}
 				if recovered != replyID {
 					return nil, fmt.Errorf("discussion reply %d readback did not match; retry delivery", replyID)
+				}
+				if action.FindingID != "" && current.IsResolved && ((action.Action == "open_with_reply" &&
+					normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) || action.Action == "resolved_with_reply") {
+					deferred[action.ThreadID] = true
+					continue
 				}
 			}
 			outcome.ReplyID = json.Number(strconv.FormatInt(replyID, 10))
@@ -202,6 +217,12 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 			}
 		}
 		outcomes = verified
+	}
+	if publication.Draft.FindingPublication != nil {
+		threads = make([]githubReviewThread, 0, len(outcomes))
+		for _, outcome := range outcomes {
+			threads = append(threads, initial[outcome.ThreadID])
+		}
 	}
 	if err := validateDiscussionOutcomes(threads, current, publication.Login, outcomes); err != nil {
 		return nil, fail("discussion_changed", "discussion synchronization readback: %v", err)
