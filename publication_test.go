@@ -66,15 +66,16 @@ func TestControllerPublishesSignedDraft(t *testing.T) {
 	}
 }
 
-func TestControllerRejectsHeadChangeBeforePublication(t *testing.T) {
+func TestControllerPublishesNewestReviewedHead(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_HEAD_COUNTER", filepath.Join(temp, "head-counter"))
 	result := ProcessAttempt(context.Background(), cfg, store, pr)
-	if result.Success || result.ErrorCode != "head_changed" {
-		t.Fatalf("changed head result = %+v", result)
+	const pushed = "fedcba9876543210fedcba9876543210fedcba98"
+	if !result.Success || result.HeadSHA != pushed || result.Pass != 2 {
+		t.Fatalf("ProcessAttempt(push before publication) = %+v, want success after reviewing %s", result, pushed)
 	}
-	if _, err := os.Stat(filepath.Join(temp, "published.review.json")); !os.IsNotExist(err) {
-		t.Fatalf("review was published after the head changed: %v", err)
+	if posts := readTestCounter(filepath.Join(temp, "published.posts")); posts != 1 {
+		t.Errorf("review posts = %d, want one result on the newest reviewed head", posts)
 	}
 }
 
@@ -119,8 +120,8 @@ func TestControllerRetainsSignatureWhenHeadChangesAfterPost(t *testing.T) {
 	cfg, pr, store, temp := publicationFixture(t)
 	t.Setenv("REVIEWCTL_FAKE_HEAD_AFTER_POST", "1")
 	result := ProcessAttempt(context.Background(), cfg, store, pr)
-	if result.Success || result.ErrorCode != "head_changed" || result.ReviewID != "123" {
-		t.Fatalf("publication followed by a head change = %+v", result)
+	if !result.Success || result.ObservedHeadSHA == "" || result.ObservedHeadSHA == result.HeadSHA || result.ReviewID != "123" {
+		t.Fatalf("publication followed by a head change = %+v, want the original committed review and a newer observed head", result)
 	}
 	data, err := os.ReadFile(filepath.Join(temp, "published.review.json"))
 	var review submittedReview
@@ -232,8 +233,8 @@ func TestControllerReassessesDiscussionAfterHumanReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := ProcessAttempt(ctx, cfg, store, pr)
-	if second.Success || second.ErrorCode != "discussion_changed" {
-		t.Fatalf("human reply = %+v", second)
+	if !second.Success || !second.Recovered || len(second.DiscussionOutcomes) != 0 {
+		t.Fatalf("human reply = %+v, want recovery of the published review with no stale thread action", second)
 	}
 	if err := store.Finish(ctx, second); err != nil {
 		t.Fatal(err)
@@ -361,8 +362,14 @@ func TestControllerRetiresPublishedReviewForOlderHead(t *testing.T) {
 			}
 			t.Setenv("REVIEWCTL_FAKE_HEAD_AFTER_POST", "1")
 			second := ProcessAttempt(ctx, cfg, store, pr)
-			if second.Success || second.ErrorCode != "head_changed" || second.Cost == nil {
-				t.Fatalf("dismissed old-head recovery = %+v", second)
+			if second.Cost == nil || !second.Recovered || second.ReviewID != first.ReviewID {
+				t.Fatalf("old-head review recovery = %+v, want the existing review and original accounting", second)
+			}
+			if changed == "dismissed" && (!second.Success || second.HeadSHA == second.ObservedHeadSHA || second.ObservedHeadSHA == "") {
+				t.Errorf("dismissed old-head recovery = %+v, want success on the reviewed commit with a follow-up head", second)
+			}
+			if changed == "edited" && (second.Success || second.ErrorCode != "review_changed") {
+				t.Errorf("edited old-head recovery = %+v, want review_changed", second)
 			}
 			if err := store.Finish(ctx, second); err != nil {
 				t.Fatal(err)
@@ -464,7 +471,7 @@ func TestPublishedCommentsAcceptOriginalLocations(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := []ReviewComment{{Path: "main.go", Line: 12, Side: "RIGHT", StartLine: 10, StartSide: "RIGHT", Body: "A finding."}}
-	if err := verifyPublishedComments(context.Background(), pr, 123, expected); err != nil {
+	if err := verifyPublishedComments(context.Background(), pr, 123, expected, false); err != nil {
 		t.Errorf("verifyPublishedComments(original line range) = %v, want no error", err)
 	}
 }

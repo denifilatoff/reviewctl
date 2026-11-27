@@ -8,8 +8,15 @@ preserve the skill's two waves and measurement step, and ask a fresh subagent to
 Sol with high reasoning effort for the coordinator and all subagents. The full grade applies regardless of diff
 size. Follow repository guidance for inspecting and testing code within the controller's scope.
 
-Put the skill's working directory under the controller's attempt workspace. Use the pinned checkout and
-revision-specific diff throughout the pass. A change to the current PR head does not change the review's target.
+Put the skill's working directory under the controller's attempt workspace. Review the controller's pinned checkout.
+Use that head in `review.json` and in the axis and verifier briefs. Before handing over, check that the checkout
+still matches the pinned head. The controller handles remote head changes, so complete the pass on the pinned
+checkout even when GitHub reports a newer head. Derive changed paths and source evidence from the pinned commits.
+Report a coverage gap if pinned evidence required for the review is unavailable.
+
+For a catch-up pass, use the two commits supplied by the controller as the transition scope and reassess the saved
+findings at the pinned head. Include affected code outside the transition diff. Use the full pinned PR diff when
+the transition or earlier evidence leaves a coverage gap. Use the pinned PR diff for GitHub inline locations.
 
 Use the installed `review-delivery` schema to write the final `review.json` at the path in the controller's instruction,
 then convert that result to the controller's JSON draft. Use its previous report as the skill's previous input.
@@ -18,8 +25,7 @@ ReviewCTL handles delivery.
 
 - Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
   any publication or discussion actions.
-- Include each verified new finding once. Keep major, minor, nit, and question labels in `review.json`. Use inline
-  comments for new findings inside a diff hunk, mapping `new` to `RIGHT` and `old` to `LEFT`.
-- Follow the controller's finding registry instructions. Use the previous report and linked discussions to
-  identify known findings and substantiate each change. Return each assessment in `finding_assessments` and leave
-  `discussions` empty. ReviewCTL assigns stable IDs and decides thread actions.
+- Record each verified finding once in `review.json`. Keep major, minor, nit, and question labels. For new findings
+  with an inline location in the pinned PR diff, map `new` to `RIGHT` and `old` to `LEFT`.
+- Use the controller's finding registry and assessment contract to report what happened to prior findings. Include
+  the evidence for each status. ReviewCTL assigns stable IDs and decides which discussion actions to take.

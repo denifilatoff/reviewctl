@@ -153,7 +153,15 @@ func ProcessAttempt(ctx context.Context, cfg Config, store *Store, pr PullReques
 		return result
 	}
 	if pending != nil {
-		return publishReviewPass(ctx, cfg, store, *pending, result.StartedAt)
+		publication, retry := publishPreparedPass(ctx, cfg, store, *pending, result.StartedAt, resolved.HeadSHA)
+		if !retry {
+			return publication
+		}
+		resolved, threads, err = pollReviewTarget(ctx, cfg, store, pr, login)
+		if err != nil {
+			setPollingError(&publication, err)
+			return publication
+		}
 	}
 	return runReviewRound(ctx, cfg, store, result, resolved, login, threads)
 }
@@ -173,62 +181,122 @@ func runReviewRound(ctx context.Context, cfg Config, store *Store, result Attemp
 		setAttemptError(&result, fail("state_failed", "read latest review pass: %v", err))
 		return result
 	}
-	if latest == nil || latest.Attempt.Pass <= state.RetiredPass {
-		state, err = store.startReviewRound(ctx, pr)
-		if err != nil {
-			setAttemptError(&result, fail("state_failed", "start review round: %v", err))
-			return result
-		}
-		result.RoundID, result.RoundKey = state.RoundID, state.RoundKey
-		if result.RoundID == 0 {
-			result.Held = true
-			return result
-		}
-
-		previous := latest
-		result.Pass = 1
-		if latest != nil {
-			result.Pass = latest.Attempt.Pass + 1
-		} else {
-			previous, err = store.previousReviewPass(result)
+	for {
+		headChanged := latest != nil && latest.Attempt.HeadSHA != resolved.HeadSHA
+		catchUp := headChanged && latest.Attempt.CatchUpPasses < maxCatchUpPasses
+		retired := latest != nil && latest.Attempt.Pass <= state.RetiredPass
+		if latest == nil || catchUp || (retired && !headChanged) {
+			active, err := store.startReviewRound(ctx, pr)
 			if err != nil {
-				setAttemptError(&result, fail("state_failed", "read previous review report: %v", err))
+				setAttemptError(&result, fail("state_failed", "start review round: %v", err))
 				return result
 			}
+			if active.RoundID == 0 {
+				if latest != nil {
+					result = latest.Attempt
+					result.Cost = nil
+					if err := store.savePausedHead(ctx, result, resolved.HeadSHA); err != nil {
+						setAttemptError(&result, fail("state_failed", "save paused round head: %v", err))
+						return result
+					}
+				}
+				result.Held = true
+				return result
+			}
+			pass := Attempt{PullRequest: pr, HeadSHA: resolved.HeadSHA, RoundID: active.RoundID, RoundKey: active.RoundKey,
+				Pass: 1, StartedAt: time.Now().UTC()}
+			previous := latest
+			if latest != nil {
+				pass.Pass = latest.Attempt.Pass + 1
+				pass.CatchUpPasses = latest.Attempt.CatchUpPasses
+				if catchUp {
+					if err := store.recordCatchUpTransition(ctx, *latest, resolved.HeadSHA); err != nil {
+						setAttemptError(&result, fail("state_failed", "record review before catch-up: %v", err))
+						return result
+					}
+					pass.CatchUpPasses++
+				}
+			} else {
+				previous, err = store.previousReviewPass(pass)
+				if err != nil {
+					setAttemptError(&result, fail("state_failed", "read previous review report: %v", err))
+					return result
+				}
+			}
+			publication, analyzed := collectReviewPass(ctx, cfg, store, pass, resolved, login, threads, previous)
+			if analyzed.ErrorCode != "" {
+				return analyzed
+			}
+			latest = &publication
+			resolved, threads, err = pollReviewTarget(ctx, cfg, store, pr, login)
+			if err != nil {
+				setPollingError(&analyzed, err)
+				return analyzed
+			}
+			continue
 		}
-
-		pass, analyzed := collectReviewPass(ctx, cfg, store, result, resolved, login, threads, previous)
-		if analyzed.ErrorCode != "" {
-			return analyzed
+		publication := latest.forObservedHead(resolved.HeadSHA)
+		if err := store.savePublication(ctx, publication); err != nil {
+			result = publication.Attempt
+			setAttemptError(&result, fail("state_failed", "save prepared publication: %v", err))
+			return result
 		}
-		latest = &pass
-		if err := refreshReviewInput(ctx, cfg, store, pr, login); err != nil {
-			setPollingError(&analyzed, err)
-			return analyzed
+		result, retry := publishPreparedPass(ctx, cfg, store, publication, result.StartedAt, resolved.HeadSHA)
+		if !retry {
+			return result
+		}
+		resolved, threads, err = pollReviewTarget(ctx, cfg, store, pr, login)
+		if err != nil {
+			setPollingError(&result, err)
+			return result
 		}
 	}
-	if err := store.savePublication(ctx, *latest); err != nil {
-		result = latest.Attempt
-		setAttemptError(&result, fail("state_failed", "save prepared publication: %v", err))
-		return result
-	}
-	return publishReviewPass(ctx, cfg, store, *latest, result.StartedAt)
 }
 
-func refreshReviewInput(ctx context.Context, cfg Config, store *Store, pr PullRequest, login string) error {
+func pollReviewTarget(ctx context.Context, cfg Config, store *Store, pr PullRequest, login string) (GitHubPullRequest, []githubReviewThread, error) {
 	resolved, err := resolveGitHub(ctx, pr)
 	if err != nil {
-		return err
+		return resolved, nil, err
 	}
 	if err := ValidateGitHubPullRequest(cfg, pr, resolved); err != nil {
-		return err
+		return resolved, nil, err
 	}
 	threads, err := listGitHubReviewThreads(ctx, pr)
 	if err != nil {
-		return err
+		return resolved, nil, err
 	}
 	_, err = store.pollReviewInput(ctx, cfg, pr, resolved.Author, login, threads)
-	return err
+	return resolved, threads, err
+}
+
+func publishPreparedPass(ctx context.Context, cfg Config, store *Store, publication Publication, startedAt time.Time, observedHead string) (Attempt, bool) {
+	result := publishReviewPass(ctx, cfg, store, publication, startedAt)
+	if result.Held {
+		if err := store.savePausedHead(ctx, result, observedHead); err != nil {
+			result.Held = false
+			setAttemptError(&result, fail("state_failed", "save paused publication head: %v", err))
+		}
+		return result, false
+	}
+	if result.RoundID == 0 || result.ReviewID != "" {
+		return result, false
+	}
+	if result.ErrorCode == "draft_rejected" && publication.Attempt.ObservedHeadSHA != "" && len(publication.Draft.Comments) != 0 {
+		publication = publication.withUnanchoredFindings()
+		if err := store.replacePreparedPublication(ctx, publication); err != nil {
+			setAttemptError(&result, fail("state_failed", "save stale review without inline anchors: %v", err))
+			return result, false
+		}
+		return publishReviewPass(ctx, cfg, store, publication, startedAt), false
+	}
+	if result.ErrorCode != "head_changed" {
+		return result, false
+	}
+	if err := store.discardUnstartedPublication(ctx, publication.Attempt); err != nil {
+		setAttemptError(&result, fail("state_failed", "retire prepared publication before catch-up: %v", err))
+		return result, false
+	}
+	return result, true
 }
 
 func setPollingError(result *Attempt, err error) {
@@ -257,14 +325,23 @@ func publishReviewPass(ctx context.Context, cfg Config, store *Store, pass Publi
 		setAttemptError(&result, fail("state_failed", "read original publication accounting: %v", err))
 		return result
 	}
-	result, err = deliverPublication(ctx, cfg, pass)
+	result, err = deliverPublication(ctx, cfg, pass, func(id int64) error {
+		published := pass
+		published.PublishedReviewID = id
+		return store.replacePreparedPublication(ctx, published)
+	})
 	result.StartedAt, result.Cost = accounting.StartedAt, accounting.Cost
 	if err != nil {
 		setPublicationError(&result, err)
 	} else if err := recordPublishedFindings(ctx, store, pass, result); err != nil {
 		setPollingError(&result, err)
-	} else if err := refreshReviewInput(ctx, cfg, store, result.PullRequest, pass.Login); err != nil {
-		setPollingError(&result, err)
+	} else {
+		latest, _, err := pollReviewTarget(ctx, cfg, store, result.PullRequest, pass.Login)
+		if err != nil {
+			setPollingError(&result, err)
+		} else if latest.HeadSHA != result.HeadSHA && result.ObservedHeadSHA == "" {
+			result.ObservedHeadSHA = latest.HeadSHA
+		}
 	}
 	return result
 }
@@ -308,7 +385,7 @@ func collectReviewPass(ctx context.Context, cfg Config, store *Store, result Att
 		setAttemptError(&result, fail("checkout_failed", "%v", err))
 		return Publication{}, result
 	}
-	if err := runCommand(ctx, "", nil, "git", "-C", source, "checkout", "--detach", resolved.HeadSHA); err != nil {
+	if err := checkoutReviewHead(ctx, source, resolved.HeadSHA); err != nil {
 		setAttemptError(&result, fail("checkout_failed", "%v", err))
 		return Publication{}, result
 	}
@@ -345,6 +422,9 @@ Evidence directory. Use paths relative to the report for those files. Keep inter
 the artifacts directory. Keep the public result brief and include any material finding that requires attention.
 `, result.RoundID, result.Pass, store.reviewDirectory(pr), previousReport, filepath.Join(artifacts, "review.json"),
 		filepath.Join(artifacts, "evidence"))
+	if previous != nil && previous.Attempt.RoundID == result.RoundID && previous.Attempt.HeadSHA != result.HeadSHA {
+		instruction += catchUpInstruction(ctx, source, previous.Attempt.HeadSHA, result.HeadSHA)
+	}
 	var rejection string
 	if err := store.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT
 		CASE WHEN error_code = 'draft_rejected' THEN error_message ELSE '' END FROM history

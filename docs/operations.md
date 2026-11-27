@@ -125,17 +125,24 @@ Replace the repository and PR number with the reported target. Complete the asse
 Automatic processing of this PR resumes when its head changes; other queued PRs continue normally. A new head retires
 the obsolete draft after recording its accounting. Do not remove the saved publication to bypass this check.
 
-ReviewCTL checks the current head before sending a new review. `head_changed` leaves the PR queued for its new revision.
-If the head changes just after the check, GitHub attaches the review to the explicit commit, and the final check keeps
-the PR queued. The submitted review already contains its accounting signature.
+If a push arrives before publication, ReviewCTL keeps the completed pass and reviews the change to the latest head in
+the same round. After five catch-up passes, further drift produces a `COMMENT` on the last reviewed commit. The comment
+identifies both that commit and the head observed after the pass. If GitHub rejects the request with inline comments, ReviewCTL
+checks for the round marker before retrying with the affected findings and locations in the review body.
+An earlier pass appears in history as `catch_up` with the message “A push arrived before publication. The completed
+pass is saved for catch-up.” The round publishes one result.
 
 Review and reply markers let a retry recover a successful request whose response was lost. `discussion_changed`
 retains the PR for reassessment when a human reply or state change invalidates a saved discussion action. Check the
 reported PR in GitHub, then allow the next scheduled `run` to reassess it.
 
-Discussion snapshots are checked before a new review is submitted. Before each discussion write, ReviewCTL rechecks
-the pinned head and the affected thread. It reads a posted reply back before changing the thread's resolution, so
-new human replies require reassessment rather than closure based on an older conversation.
+ReviewCTL checks the discussion snapshot before submitting a new review. Once GitHub accepts a round's review,
+delivery can resume after a push. Thread ownership, current state, and reply readback still govern each write.
+A newer head or eligible author reply during delivery queues another round. A pause at a pass boundary saves the
+pass and holds both catch-up and publication until the round can continue.
+
+`review_changed` means the saved review's marker is missing or its body changed after publication and the PR has a
+newer head. The existing review remains on GitHub, and the next run can assess the newer head in a fresh round.
 
 ReviewCTL reads every page of threads and replies to build a complete discussion snapshot. If a read returns
 `github_failed` with `GitHub returned an incomplete page`, `GitHub repeated a pagination cursor`, or
@@ -229,7 +236,7 @@ reviewctl run
 Only one `run` process can execute at once. A concurrent call reports `already_running` and exits successfully. A
 failed discovery or review attempt makes `run` exit with code `1`. Transient failures remain queued for a later run.
 An untrusted, closed, or draft pull request leaves the queue and can return through discovery after its eligibility
-changes. If a pull request head changes during an attempt, `run` reports `head_changed` and leaves the entry queued.
+changes. A push during review can extend the same round and cause `run` to report its result after several passes.
 
 A review attempt can take several minutes, and `run` writes its result after the attempt finishes. Use
 `reviewctl status` to check `run_active`; do not interrupt an active attempt or start a replacement process.

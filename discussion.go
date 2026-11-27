@@ -47,6 +47,23 @@ func inspectPublicationDiscussion(publication Publication, action DiscussionActi
 	return resolved, replyID, nil
 }
 
+func (publication Publication) receivedDiscussionFeedback(before, current githubReviewThread) bool {
+	if publication.Attempt.RoundID == 0 {
+		return false
+	}
+	original := make(map[int64]githubReviewComment, len(before.Comments))
+	for _, comment := range before.Comments {
+		original[comment.DatabaseID] = comment
+	}
+	for _, comment := range current.Comments {
+		if normalizeGitHubLogin(comment.Author) != publication.Login &&
+			original[comment.DatabaseID] != comment {
+			return true
+		}
+	}
+	return false
+}
+
 func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Publication) ([]DiscussionOutcome, error) {
 	if publication.Draft.FindingPublication != nil && len(publication.Draft.Discussions) == 0 {
 		return []DiscussionOutcome{}, nil
@@ -65,6 +82,7 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 		currentThreads[thread.ID] = thread
 	}
 	outcomes := make([]DiscussionOutcome, 0, len(publication.Draft.Discussions))
+	deferred := make(map[string]bool)
 	for _, action := range publication.Draft.Discussions {
 		before, current := initial[action.ThreadID], currentThreads[action.ThreadID]
 		if action.Action != "preserved" {
@@ -72,17 +90,23 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 			if err != nil {
 				return nil, err
 			}
-			if _, err := resolvePublicationTarget(ctx, cfg, pr, publication.Attempt.HeadSHA); err != nil {
+			if _, err := publication.targetAfterStart(ctx, cfg); err != nil {
 				return nil, err
 			}
+		}
+		if publication.receivedDiscussionFeedback(before, current) {
+			deferred[action.ThreadID] = true
+			continue
 		}
 		resolved, replyID, err := inspectPublicationDiscussion(publication, action, before, current)
 		if err != nil {
 			return nil, err
 		}
-		if action.FindingID != "" && current.IsResolved && ((action.Action == "open_with_reply" &&
-			normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) || (action.Action == "resolved_with_reply" &&
+		if action.FindingID != "" && ((action.Action == "open_with_reply" &&
+			((current.IsResolved && normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) ||
+				(!current.IsResolved && replyID == 0))) || (action.Action == "resolved_with_reply" && current.IsResolved &&
 			(replyID == 0 || normalizeGitHubLogin(current.ResolvedBy) != publication.Login))) {
+			deferred[action.ThreadID] = true
 			continue
 		}
 		outcome := DiscussionOutcome{ThreadID: action.ThreadID, Action: action.Action}
@@ -97,6 +121,10 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 					if isGitHubValidationError(err) {
 						after, lookupErr := readGitHubReviewThread(ctx, action.ThreadID)
 						if lookupErr == nil {
+							if publication.receivedDiscussionFeedback(before, after) {
+								deferred[action.ThreadID] = true
+								continue
+							}
 							_, created, inspectErr := inspectPublicationDiscussion(publication, action, before, after)
 							if inspectErr != nil {
 								return nil, inspectErr
@@ -116,8 +144,12 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 				if err != nil {
 					return nil, err
 				}
-				if _, err := resolvePublicationTarget(ctx, cfg, pr, publication.Attempt.HeadSHA); err != nil {
+				if _, err := publication.targetAfterStart(ctx, cfg); err != nil {
 					return nil, err
+				}
+				if publication.receivedDiscussionFeedback(before, current) {
+					deferred[action.ThreadID] = true
+					continue
 				}
 				_, recovered, err := inspectPublicationDiscussion(publication, action, before, current)
 				if err != nil {
@@ -128,6 +160,7 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 				}
 				if action.FindingID != "" && current.IsResolved && ((action.Action == "open_with_reply" &&
 					normalizeGitHubLogin(current.ResolvedBy) != action.ExpectedResolver) || action.Action == "resolved_with_reply") {
+					deferred[action.ThreadID] = true
 					continue
 				}
 			}
@@ -154,22 +187,44 @@ func syncPublicationDiscussions(ctx context.Context, cfg Config, publication Pub
 	if err != nil {
 		return nil, err
 	}
+	clear(currentThreads)
 	for _, thread := range current {
 		currentThreads[thread.ID] = thread
 	}
 	for _, action := range publication.Draft.Discussions {
-		if _, _, err := inspectPublicationDiscussion(publication, action, initial[action.ThreadID], currentThreads[action.ThreadID]); err != nil {
-			return nil, err
+		before, after := initial[action.ThreadID], currentThreads[action.ThreadID]
+		if publication.receivedDiscussionFeedback(before, after) {
+			deferred[action.ThreadID] = true
+		}
+		if !deferred[action.ThreadID] {
+			if _, _, err := inspectPublicationDiscussion(publication, action, before, after); err != nil {
+				return nil, err
+			}
 		}
 	}
-	expected := publication.Threads
-	if publication.Draft.FindingPublication != nil {
-		expected = make([]githubReviewThread, 0, len(outcomes))
+	threads = publication.Threads
+	if len(deferred) != 0 {
+		threads = make([]githubReviewThread, 0, len(publication.Threads))
+		for _, thread := range publication.Threads {
+			if !deferred[thread.ID] {
+				threads = append(threads, thread)
+			}
+		}
+		verified := outcomes[:0]
 		for _, outcome := range outcomes {
-			expected = append(expected, initial[outcome.ThreadID])
+			if !deferred[outcome.ThreadID] {
+				verified = append(verified, outcome)
+			}
+		}
+		outcomes = verified
+	}
+	if publication.Draft.FindingPublication != nil {
+		threads = make([]githubReviewThread, 0, len(outcomes))
+		for _, outcome := range outcomes {
+			threads = append(threads, initial[outcome.ThreadID])
 		}
 	}
-	if err := validateDiscussionOutcomes(expected, current, publication.Login, outcomes); err != nil {
+	if err := validateDiscussionOutcomes(threads, current, publication.Login, outcomes); err != nil {
 		return nil, fail("discussion_changed", "discussion synchronization readback: %v", err)
 	}
 	return outcomes, nil

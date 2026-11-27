@@ -1043,16 +1043,15 @@ repositories:
 	headChangeEnv := append(append([]string{}, env...),
 		"REVIEWCTL_FAKE_HEAD_COUNTER="+filepath.Join(temp, "head-counter"))
 	result = runCLI(t, headChangeEnv, binary, "--json", "run")
-	if result.exitCode != 1 || !strings.Contains(result.stdout, `"code":"head_changed"`) {
+	if result.exitCode != 0 || result.object["status"] != "success" {
 		t.Fatalf("moving head result: %+v", result)
 	}
-	queue, history, err = store.Status(context.Background(), 1)
-	if err != nil || len(queue) != 1 || queue[0].Number != 7 || len(history) != 1 ||
-		history[0].Number != 7 || history[0].ErrorCode != "head_changed" {
+	queue, history, err = store.Status(context.Background(), 2)
+	const pushed = "fedcba9876543210fedcba9876543210fedcba98"
+	if err != nil || len(queue) != 0 || len(history) != 2 || history[0].Number != 7 ||
+		!history[0].Success || history[0].HeadSHA != pushed || history[0].Pass != 2 ||
+		history[1].RoundID != history[0].RoundID || history[1].ErrorCode != "catch_up" {
 		t.Fatalf("moving head state: queue=%+v history=%+v err=%v", queue, history, err)
-	}
-	if _, err := os.Stat(reviewPath); !os.IsNotExist(err) {
-		t.Fatalf("moving-head review was published: %v", err)
 	}
 }
 
@@ -1609,18 +1608,24 @@ func TestCodexDescendantProcess(t *testing.T) {
 }
 
 func helperGit(args []string) {
-	const head = "0123456789abcdef0123456789abcdef01234567"
 	state := os.Getenv("REVIEWCTL_FAKE_GIT_STATE")
-	if len(args) == 5 && args[0] == "-C" && args[2] == "fetch" && args[3] == "origin" &&
-		args[4] == "refs/pull/7/head" {
+	if len(args) == 5 && args[0] == "-C" && args[2] == "fetch" && args[3] == "origin" {
+		head := args[4]
+		if head == "refs/pull/7/head" {
+			head = fakeCatchUpHead("0123456789abcdef0123456789abcdef01234567")
+		}
 		if os.WriteFile(state, []byte(head), 0o600) != nil {
 			os.Exit(96)
 		}
 		return
 	}
-	if len(args) == 5 && args[0] == "-C" && args[2] == "checkout" && args[3] == "--detach" && args[4] == head {
+	if len(args) == 6 && args[0] == "-C" && args[2] == "merge-base" && args[3] == "--is-ancestor" &&
+		os.Getenv("REVIEWCTL_FAKE_HEADS_AFTER_CODEX") != "" {
+		return
+	}
+	if len(args) == 5 && args[0] == "-C" && args[2] == "checkout" && args[3] == "--detach" {
 		fetched, err := os.ReadFile(state)
-		if err != nil || string(fetched) != head {
+		if err != nil || string(fetched) != args[4] {
 			os.Exit(97)
 		}
 		if os.Remove(state) != nil {
@@ -1647,7 +1652,8 @@ func helperGH(args []string) {
 		if json.Unmarshal(data, &request) != nil || request.Commit == "" {
 			os.Exit(76)
 		}
-		if os.Getenv("REVIEWCTL_FAKE_REJECT_POST") != "" {
+		if os.Getenv("REVIEWCTL_FAKE_REJECT_POST") != "" ||
+			(os.Getenv("REVIEWCTL_FAKE_REJECT_STALE_INLINE") != "" && request.Event == "COMMENT" && len(request.Comments) != 0) {
 			fmt.Print(`{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"comments","code":"invalid"}],"status":"422"}`)
 			fmt.Fprintln(os.Stderr, "gh: Validation Failed (HTTP 422)")
 			os.Exit(1)
@@ -2101,7 +2107,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"url": args[2], "number": number, "state": state, "isDraft": os.Getenv("REVIEWCTL_FAKE_PR_DRAFT") != "",
-			"headRefOid": head, "author": map[string]string{"login": author},
+			"headRefOid": fakeCatchUpHead(head), "author": map[string]string{"login": author},
 		})
 		return
 	}
@@ -2353,6 +2359,7 @@ func helperCodex(args []string) {
 			os.Exit(95)
 		}
 	}
+	advanceFakeCatchUpHead()
 	if commands := os.Getenv("REVIEWCTL_FAKE_COMMAND_AFTER_CODEX"); commands != "" {
 		if os.WriteFile(os.Getenv("REVIEWCTL_FAKE_STATE")+".issue-comments.json", []byte(commands), 0o600) != nil {
 			os.Exit(95)

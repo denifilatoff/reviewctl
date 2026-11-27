@@ -198,3 +198,23 @@ func (s *Store) deliveryAttempt(ctx context.Context, pass Publication, resumedAt
 	}
 	return result, nil
 }
+
+func (s *Store) recordCatchUpTransition(ctx context.Context, pass Publication, observedHead string) error {
+	attempt := pass.Attempt
+	var recorded bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM history
+		WHERE provider = ? AND repository = ? AND change_number = ? AND round_id = ? AND pass_number = ?
+		AND error_code = 'catch_up')`, append(pullRequestKey(attempt.PullRequest), attempt.RoundID, attempt.Pass)...).Scan(&recorded); err != nil || recorded {
+		return err
+	}
+	now := time.Now().UTC()
+	attempt, err := s.deliveryAttempt(ctx, pass, now)
+	if err != nil {
+		return err
+	}
+	attempt.FinishedAt = now
+	attempt.ObservedHeadSHA = observedHead
+	attempt.ErrorCode = "catch_up"
+	attempt.ErrorMessage = "A push arrived before publication. The completed pass is saved for catch-up."
+	return s.Finish(ctx, attempt)
+}

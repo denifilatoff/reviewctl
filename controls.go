@@ -14,15 +14,16 @@ import (
 )
 
 type reviewControl struct {
-	Paused       bool
-	Manual       bool
-	Requested    bool
-	RoundID      int64
-	RoundKey     string
-	LastRoundID  int64
-	PermitPaused bool
-	RetiredPass  int
-	PolledAt     time.Time
+	Paused         bool
+	Manual         bool
+	Requested      bool
+	RoundID        int64
+	RoundKey       string
+	LastRoundID    int64
+	PermitPaused   bool
+	RetiredPass    int
+	PendingHeadSHA string
+	PolledAt       time.Time
 }
 
 type reviewInput struct {
@@ -91,6 +92,7 @@ func (s *Store) startReviewRound(ctx context.Context, pr PullRequest) (reviewCon
 	}
 	state.PermitPaused = state.PermitPaused || (state.Paused && state.Manual)
 	state.Manual, state.Requested = false, false
+	state.PendingHeadSHA = ""
 	if err := saveReviewControl(ctx, tx, pr, state); err != nil {
 		return reviewControl{}, err
 	}
@@ -429,4 +431,28 @@ func (s *Store) permitHeldPublication(ctx context.Context, pr PullRequest, round
 		}
 	}
 	return !state.Paused || state.PermitPaused, tx.Commit()
+}
+
+func (s *Store) savePausedHead(ctx context.Context, attempt Attempt, head string) error {
+	if attempt.RoundID == 0 || head == attempt.HeadSHA {
+		return nil
+	}
+	pr := attempt.PullRequest
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	state, _, err := readReviewControl(ctx, tx, pr)
+	if err != nil {
+		return err
+	}
+	if state.RoundID != attempt.RoundID || !state.Paused || state.PendingHeadSHA == head {
+		return nil
+	}
+	state.PendingHeadSHA = head
+	if err := saveReviewControl(ctx, tx, pr, state); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

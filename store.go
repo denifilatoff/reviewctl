@@ -22,6 +22,9 @@ type Attempt struct {
 	RoundID            int64               `json:"round_id,omitempty"`
 	RoundKey           string              `json:"round_key,omitempty"`
 	Pass               int                 `json:"pass,omitempty"`
+	CatchUpPasses      int                 `json:"catch_up_passes,omitempty"`
+	ObservedHeadSHA    string              `json:"observed_head_sha,omitempty"`
+	DiscussionOutcomes []DiscussionOutcome `json:"discussion_outcomes,omitempty"`
 	Held               bool                `json:"held,omitempty"`
 	Cost               *ReviewCost         `json:"cost,omitempty"`
 	HeadSHA            string              `json:"head_sha,omitempty"`
@@ -33,7 +36,6 @@ type Attempt struct {
 	ReviewID           string              `json:"review_id,omitempty"`
 	ReviewURL          string              `json:"review_url,omitempty"`
 	Recovered          bool                `json:"recovered,omitempty"`
-	DiscussionOutcomes []DiscussionOutcome `json:"discussion_outcomes,omitempty"`
 	ErrorCode          string              `json:"error_code,omitempty"`
 	ErrorMessage       string              `json:"error_message,omitempty"`
 }
@@ -420,7 +422,7 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	retirePass := (attempt.ErrorCode == "head_changed" || attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected") &&
 		(attempt.RoundID == 0 || attempt.ReviewID == "")
 	roundNeedsReassessment := attempt.RoundID != 0 && attempt.ReviewID != "" &&
-		(attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected")
+		(attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected" || attempt.ErrorCode == "review_changed")
 	if removeFromQueue || retirePass || roundNeedsReassessment {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM review_publications
 			WHERE provider = ? AND repository = ? AND change_number = ?`, attempt.Provider, attempt.Repository, attempt.Number); err != nil {
@@ -435,6 +437,7 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 		switch {
 		case removeFromQueue || roundNeedsReassessment:
 			state.RoundID, state.RoundKey, state.RetiredPass, state.PermitPaused = 0, "", 0, false
+			state.PendingHeadSHA = ""
 		case retirePass:
 			state.RetiredPass = max(state.RetiredPass, attempt.Pass)
 		}
@@ -442,7 +445,7 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 			return fmt.Errorf("record round state: %w", err)
 		}
 	}
-	if attempt.Success && (state.Manual || state.Requested) {
+	if attempt.Success && (state.Manual || state.Requested || attempt.ObservedHeadSHA != "") {
 		removeFromQueue = false
 	}
 

@@ -48,11 +48,12 @@ type DiscussionAction struct {
 }
 
 type Publication struct {
-	Attempt          Attempt
-	Draft            ReviewDraft
-	Login            string
-	Threads          []githubReviewThread
-	ExistingReviewID int64
+	Attempt           Attempt
+	Draft             ReviewDraft
+	Login             string
+	Threads           []githubReviewThread
+	ExistingReviewID  int64
+	PublishedReviewID int64 `json:",omitempty"`
 }
 
 func readDraft(filePath string) (ReviewDraft, error) {
@@ -218,7 +219,7 @@ func resolvePublicationTarget(ctx context.Context, cfg Config, pr PullRequest, h
 	if err := ValidateGitHubPullRequest(cfg, pr, current); err != nil {
 		return current, err
 	}
-	if current.HeadSHA != head {
+	if head != "" && current.HeadSHA != head {
 		return current, fail("head_changed", "pull request head changed; reassess the current revision")
 	}
 	return current, nil
@@ -249,10 +250,14 @@ func isGitHubValidationError(err error) bool {
 	return errors.As(err, &apiError) && (apiError.Status == 400 || apiError.Status == 422)
 }
 
-func deliverPublication(ctx context.Context, cfg Config, publication Publication) (Attempt, error) {
+func deliverPublication(ctx context.Context, cfg Config, publication Publication, recordReviewID func(int64) error) (Attempt, error) {
 	result := publication.Attempt
 	pr := result.PullRequest
-	current, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA)
+	if result.ObservedHeadSHA != "" && (result.RoundID == 0 ||
+		result.ObservedHeadSHA == result.HeadSHA || publication.Draft.Verdict != "COMMENT") {
+		return result, fmt.Errorf("stale publication requires a COMMENT and a distinct observed head")
+	}
+	current, err := publication.targetAfterStart(ctx, cfg)
 	if err != nil {
 		return result, err
 	}
@@ -272,7 +277,17 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	if publication.ExistingReviewID != 0 && id != publication.ExistingReviewID {
 		return result, fmt.Errorf("saved review is missing or its marker changed")
 	}
+	if publication.PublishedReviewID != 0 && id != publication.PublishedReviewID {
+		result.ReviewID = strconv.FormatInt(publication.PublishedReviewID, 10)
+		if id == 0 && current.HeadSHA != result.HeadSHA {
+			return result, fail("review_changed", "published review marker is missing; reassess in a new round")
+		}
+		return result, fmt.Errorf("published review does not match the saved review identity")
+	}
 	if id == 0 {
+		if result.ObservedHeadSHA == "" && current.HeadSHA != result.HeadSHA {
+			return result, fail("head_changed", "pull request head changed; reassess the current revision")
+		}
 		threads, err := listGitHubReviewThreads(ctx, pr)
 		if err != nil {
 			return result, err
@@ -280,7 +295,11 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 		if err := validatePublicationSnapshot(publication.Threads, threads); err != nil {
 			return result, err
 		}
-		if _, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA); err != nil {
+		head := result.HeadSHA
+		if result.ObservedHeadSHA != "" {
+			head = ""
+		}
+		if _, err := resolvePublicationTarget(ctx, cfg, pr, head); err != nil {
 			return result, err
 		}
 		var review submittedReview
@@ -300,22 +319,43 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 		if id <= 0 {
 			return result, fmt.Errorf("GitHub returned no published review ID")
 		}
+		if result.RoundID != 0 && recordReviewID != nil {
+			result.ReviewID = strconv.FormatInt(id, 10)
+			if err := recordReviewID(id); err != nil {
+				return result, fail("state_failed", "record published review identity: %v", err)
+			}
+			recordReviewID = nil
+		}
 	}
-	review, err := readPublishedReview(ctx, result, id, login, login == normalizeGitHubLogin(current.Author))
+	commentExpected := login == normalizeGitHubLogin(current.Author) || result.ObservedHeadSHA != ""
+	review, err := readPublishedReview(ctx, result, id, login, commentExpected)
+	dismissedAfterPush := false
 	if err != nil {
 		var coded *codedError
 		if errors.As(err, &coded) && coded.code == "review_dismissed" {
-			latest, lookupErr := resolveGitHub(ctx, pr)
-			if lookupErr == nil && latest.HeadSHA != result.HeadSHA {
+			latest, lookupErr := resolvePublicationTarget(ctx, cfg, pr, "")
+			if lookupErr == nil && latest.HeadSHA != result.HeadSHA && result.RoundID == 0 {
 				result.ReviewID, result.ReviewURL = strconv.FormatInt(id, 10), review.URL
 				return result, fail("head_changed", "a newer pull request head dismissed the published review")
 			}
+			dismissedAfterPush = lookupErr == nil && latest.HeadSHA != result.HeadSHA && !commentExpected
 		}
-		return result, err
+		if !dismissedAfterPush {
+			return result, err
+		}
 	}
 	result.ReviewID, result.ReviewURL = strconv.FormatInt(id, 10), review.URL
+	if result.RoundID != 0 && recordReviewID != nil && publication.PublishedReviewID == 0 {
+		if err := recordReviewID(id); err != nil {
+			return result, fail("state_failed", "record published review identity: %v", err)
+		}
+	}
 	result.Verdict = map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
-	if _, err := resolvePublicationTarget(ctx, cfg, pr, result.HeadSHA); err != nil {
+	if dismissedAfterPush {
+		result.Verdict = publication.Draft.Verdict
+	}
+	current, err = publication.targetAfterStart(ctx, cfg)
+	if err != nil {
 		return result, err
 	}
 	if publication.ExistingReviewID != 0 && (publication.Draft.NewFindings || len(publication.Draft.Comments) != 0 ||
@@ -327,27 +367,27 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	}
 	if publication.ExistingReviewID == 0 {
 		if review.Body != publication.Draft.Body {
+			if result.RoundID != 0 && current.HeadSHA != result.HeadSHA {
+				return result, fail("review_changed", "published review body changed; reassess in a new round")
+			}
 			return result, fmt.Errorf("published review body differs from the saved publication")
 		}
-		if err := verifyPublishedComments(ctx, pr, id, publication.Draft.Comments); err != nil {
+		if err := verifyPublishedComments(ctx, pr, id, publication.Draft.Comments, current.HeadSHA != result.HeadSHA); err != nil {
 			return result, err
 		}
 	}
-	if result.DiscussionOutcomes, err = syncPublicationDiscussions(ctx, cfg, publication); err != nil {
-		return result, err
-	}
-	current, err = resolveGitHub(ctx, pr)
+	result.DiscussionOutcomes, err = syncPublicationDiscussions(ctx, cfg, publication)
 	if err != nil {
 		return result, err
 	}
-	if current.HeadSHA != result.HeadSHA {
-		return result, fail("head_changed", "pull request head changed during discussion synchronization")
+	if _, err := publication.targetAfterStart(ctx, cfg); err != nil {
+		return result, err
 	}
 	result.Success = true
 	return result, nil
 }
 
-func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expected []ReviewComment) error {
+func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expected []ReviewComment, preferOriginal bool) error {
 	if len(expected) == 0 {
 		return nil
 	}
@@ -369,10 +409,10 @@ func verifyPublishedComments(ctx context.Context, pr PullRequest, id int64, expe
 				continue
 			}
 			comment := wire.ReviewComment
-			if comment.Line == 0 {
+			if comment.Line == 0 || (preferOriginal && wire.OriginalLine != 0) {
 				comment.Line = wire.OriginalLine
 			}
-			if comment.StartLine == 0 {
+			if comment.StartLine == 0 || (preferOriginal && wire.OriginalStartLine != 0) {
 				comment.StartLine = wire.OriginalStartLine
 			}
 			found := false

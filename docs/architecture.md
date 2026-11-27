@@ -175,7 +175,8 @@ snapshot. A retry loads this row and checks GitHub for the review marker before 
 accounting is recorded once, including when the process exits after publication and before the history transaction.
 Successful delivery clears the prepared publication in the history transaction.
 
-Known revision drift before publication retires the prepared payload after recording its original accounting.
+Revision drift before the first write can retire the prepared payload and lead to a catch-up pass in the same round.
+The finished pass and its accounting remain in the review history.
 An eligibility rejection stops processing. Stale discussions and confirmed GitHub validation failures can require
 reassessment. An uncertain request failure retains the prepared payload for readback and retry.
 
@@ -238,8 +239,9 @@ The controller keeps a saved pass pinned to its reviewed SHA.
 2. Read its discussions and any new commands. Honor a pause unless this round has permission to run during it.
 3. Install the locked APM skills in a temporary workspace and hash the installed set.
 4. Run Codex with the pinned SHA, finding registry, PR history directory, and previous report path.
-5. Stage the report and evidence, reconcile finding IDs in SQLite, and save the completed pass. Refresh commands before
-   preparing publication.
+5. Stage the report and evidence, reconcile finding IDs in SQLite, and save the completed pass. Refresh commands,
+   discussions, and the head. If the head has moved, review the transition to the latest revision unless the round
+   has reached its catch-up limit or is paused.
 6. Recheck eligibility, revision, and discussions, publish through `gh`, verify readback, and synchronize owned threads.
 7. Record the delivery outcome. Retain the PR in the queue if new work arrived.
 
@@ -247,13 +249,13 @@ Before another Codex invocation, a retry completes any staged pass for the activ
 publication. It recovers the marked review after verifying its author, commit, URL, and event. Publications prepared
 by older versions retain their SHA-and-skill markers and conflict checks.
 
-`APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
-valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
-These outcomes are not process failures.
+Rounds allow one full pass and five completed catch-up passes. If the head still differs at the limit, the controller
+uses `COMMENT` and names the reviewed and observed commits. A self-authored pull request also receives `COMMENT`.
+Other completed assessments publish `APPROVE` or `REQUEST_CHANGES` according to the validated draft.
 
-If the head changes before the publication check, ReviewCTL returns `head_changed` and keeps the PR queued.
-GitHub review creation includes the pinned `commit_id`. A change after the check leaves the review attached to that
-explicit commit with its accounting signature. The final head check keeps the new revision queued.
+GitHub review creation always includes the reviewed `commit_id`. Once the round marker is present, a newer head
+does not stop recovery of the review and its thread writes. The controller checks that writes match the saved
+publication and queues the newer head for a fresh round.
 
 ## Trust and publication
 
@@ -279,12 +281,9 @@ finding status and recorded closure provenance. `discussion_changed` keeps the P
 human comments or state changes invalidate a saved action.
 
 Before posting a new review, ReviewCTL validates the discussion snapshot used for its assessment. Discussion writes
-use fresh reads of the affected thread and current head. After posting a reply, the controller reads it back and
-checks for intervening human activity before resolving or reopening. Mutating actions read their own thread before
-writing, with a full final readback of their outcomes. The registry stores each verified closure with the fix SHA.
-
-The controller resolves the authenticated GitHub login directly through `gh`. For a self-authored PR it submits
-`COMMENT` while retaining the assessment in the review body. Other PRs receive `APPROVE` or `REQUEST_CHANGES`.
+use fresh thread reads under the authenticated GitHub login. The controller checks posted replies before resolving or
+reopening threads and defers actions invalidated by new human replies. It verifies the completed actions in a full
+final readback. The registry stores each verified closure with the fix SHA.
 
 The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
 running as that user or prove who authored every commit in a trusted pull request.
