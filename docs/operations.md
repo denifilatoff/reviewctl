@@ -127,7 +127,7 @@ the obsolete draft after recording its accounting. Do not remove the saved publi
 
 If a push arrives before publication, ReviewCTL keeps the completed pass and reviews the change to the latest head in
 the same round. After five catch-up passes, further drift produces a `COMMENT` on the last reviewed commit. The comment
-identifies both that commit and the head observed after the pass. If GitHub rejects its inline locations, ReviewCTL
+identifies both that commit and the head observed after the pass. If GitHub rejects the request with inline comments, ReviewCTL
 checks for the round marker before retrying with the affected findings and locations in the review body.
 An earlier pass appears in history as `catch_up` with the message “A push arrived before publication. The completed
 pass is saved for catch-up.” The round publishes one result.

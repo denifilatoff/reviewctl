@@ -74,7 +74,7 @@ flowchart LR
 | GitHub code | Resolve PR state, publish reviews, synchronize owned discussions, and verify readback |
 | Codex code | Start and cancel Codex, then decode the prepared review draft |
 | APM | Install the locked review skills into a fresh attempt workspace |
-| SQLite | Store discovery baselines, queued PRs, prepared publications, and review history |
+| SQLite | Store discovery baselines, queued PRs, prepared publications, review history, and the finding registry |
 
 ## Configuration
 
@@ -238,15 +238,16 @@ The controller keeps a saved pass pinned to its reviewed SHA.
 1. Resolve the PR and verify its repository, state, and author.
 2. Read its discussions and any new commands. Honor a pause unless this round has permission to run during it.
 3. Install the locked APM skills in a temporary workspace and hash the installed set.
-4. Run Codex with the pinned SHA, PR history directory, and previous report path.
-5. Save the validated report and referenced evidence. Refresh commands, discussions, and the head. If the head has
-   moved, review the transition to the latest revision unless the round has reached its catch-up limit or is paused.
+4. Run Codex with the pinned SHA, finding registry, PR history directory, and previous report path.
+5. Stage the report and evidence, reconcile finding IDs in SQLite, and save the completed pass. Refresh commands,
+   discussions, and the head. If the head has moved, review the transition to the latest revision unless the round
+   has reached its catch-up limit or is paused.
 6. Recheck eligibility, revision, and discussions, publish through `gh`, verify readback, and synchronize owned threads.
 7. Record the delivery outcome. Retain the PR in the queue if new work arrived.
 
-Before another Codex invocation, a retry tries the saved publication. It recovers the marked review after verifying
-its author, commit, URL, and event. Publications prepared by older versions retain their SHA-and-skill markers and
-conflict checks.
+Before another Codex invocation, a retry completes any staged pass for the active round and resumes a saved
+publication. It recovers the marked review after verifying its author, commit, URL, and event. Publications prepared
+by older versions retain their SHA-and-skill markers and conflict checks.
 
 Rounds allow one full pass and five completed catch-up passes. If the head still differs at the limit, the controller
 uses `COMMENT` and names the reviewed and observed commits. A self-authored pull request also receives `COMMENT`.
@@ -265,8 +266,9 @@ The trusted instruction limits Codex to one repository, pull request, expected h
 publication policy. Repository instructions may guide review and test commands, but they cannot broaden that scope.
 
 Codex and the locked review skill produce a structured draft containing the pinned scope, verdict, summary, inline
-comments, and one proposed action for each owned discussion. The instruction forbids GitHub writes and switching
-the attempt to another SHA. ReviewCTL validates the draft before preparing an external request.
+comments, and assessments of known findings. The controller assigns IDs within the PR and writes them into the saved
+skill report. The instruction forbids GitHub writes and switching the attempt to another SHA. ReviewCTL validates the
+draft before preparing an external request.
 
 ReviewCTL owns review creation and discussion writes. Its initial review request includes the exact `commit_id`,
 idempotency marker, and available accounting signature. Readback verifies the reviewer, commit, URL, event, body, and
@@ -274,14 +276,14 @@ inline comments. A saved publication requires the same authenticated reviewer on
 
 Before changing a discussion, ReviewCTL verifies that the authenticated reviewer authored its root comment and that
 pre-existing comments remain intact. Each reply contains a marker tied to the prepared publication and thread. A retry
-recovers that reply before attempting another write. Resolve and reopen operations follow the proposed action and are
-verified against the complete discussion snapshot. `discussion_changed` keeps the PR queued for reassessment when
+recovers that reply before attempting another write. The controller derives resolve and reopen actions from verified
+finding status and recorded closure provenance. `discussion_changed` keeps the PR queued for reassessment when
 human comments or state changes invalidate a saved action.
 
 Before posting a new review, ReviewCTL validates the discussion snapshot used for its assessment. Discussion writes
 use fresh thread reads under the authenticated GitHub login. The controller checks posted replies before resolving or
 reopening threads and defers actions invalidated by new human replies. It verifies the completed actions in a full
-final readback.
+final readback. The registry stores each verified closure with the fix SHA.
 
 The trust policy assumes one trusted user account on one trusted laptop. It does not defend against another process
 running as that user or prove who authored every commit in a trusted pull request.
@@ -300,8 +302,9 @@ apm install --frozen --root <attempt-workspace> --target codex
 `reviewctl` hashes the installed skill set once and includes the digest in the instruction, draft validation,
 and history. An APM failure stops the attempt before Codex starts and is recorded in history.
 
-Update the checked-in APM lockfile to change the pinned review skills. The bundled grade skill is installed from the
-ReviewCTL binary and participates in the same digest.
+Update the checked-in APM lockfile to change the pinned review skills. Run `make apm-check` to verify that the locked
+review schema still accepts ReviewCTL's finding IDs. The bundled grade skill is installed from the ReviewCTL binary
+and participates in the same digest.
 
 ## Workspace
 

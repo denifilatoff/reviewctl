@@ -48,7 +48,7 @@ func checkoutReviewHead(ctx context.Context, source, head string) error {
 
 func (publication Publication) withUnanchoredFindings() Publication {
 	var locations strings.Builder
-	locations.WriteString("GitHub rejected the inline locations. Findings on the reviewed revision:\n")
+	locations.WriteString("Findings from the reviewed revision:\n")
 	for _, comment := range publication.Draft.Comments {
 		firstLine, _, _ := strings.Cut(strings.TrimSpace(comment.Body), "\n")
 		fmt.Fprintf(&locations, "- %s at %q, %s line %d\n", bounded(firstLine, 180), comment.Path, comment.Side, comment.Line)
