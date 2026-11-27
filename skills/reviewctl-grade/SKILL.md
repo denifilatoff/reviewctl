@@ -11,8 +11,10 @@ size. Follow repository guidance for inspecting and testing code within the cont
 Put the skill's working directory under the controller's attempt workspace. Review only the pinned head.
 If the head changes, report a coverage gap so ReviewCTL can start a new attempt.
 
-Use the installed `review-delivery` schema to write `review.json`, then convert that result to the JSON draft in
-the controller's instruction. ReviewCTL handles delivery.
+Use the installed `review-delivery` schema to write the final `review.json` at the path in the controller's instruction,
+then convert that result to the controller's JSON draft. Use its previous report as the skill's previous input.
+Keep evidence files referenced by the final report under the evidence directory. Use paths relative to the report.
+ReviewCTL handles delivery.
 
 - Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
   any publication or discussion actions.

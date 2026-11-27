@@ -26,7 +26,8 @@ harness. It does not implement either extension or a plugin system.
 
 ## Process model
 
-`reviewctl` is a stateless CLI. Durable state lives in SQLite. An operating-system scheduler invokes `reviewctl run`
+`reviewctl` keeps queue and round state in SQLite, with review reports and evidence under the state directory.
+An operating-system scheduler invokes `reviewctl run`
 at a fixed interval.
 
 On macOS, `launchd` owns the schedule and process restart behavior:
@@ -158,10 +159,15 @@ the latest revision needs review.
 One `run` invocation reads a queue snapshot and processes every entry in that snapshot at most once, in deterministic
 insertion order. Entries added after the snapshot wait for the next invocation.
 
-`run` records history and updates the queue in one transaction. A confirmed success or an eligibility rejection
-(`untrusted_author`, `pr_not_open`, or `pr_draft`) removes the pull request. Other failures leave it queued. Discovery
-can queue the pull request again after its author becomes trusted, it is reopened, or its draft status changes. The
-operating-system schedule supplies the retry cadence; the MVP has no retry loop, backoff policy, or retry counter.
+The queue wakes the worker. A separate record holds the pause state, active round, one-round permission while paused,
+and pending inputs. `run` records history and updates the queue and round state in one transaction. A completed round
+removes the PR if no new input is pending. An eligibility rejection (`untrusted_author`, `pr_not_open`, or `pr_draft`)
+removes it until rediscovery. The operating-system schedule supplies the retry cadence.
+
+Discovery reads the repository's issue-comment and review-comment feeds from its saved cursor. It fetches full review
+threads for PRs with candidate inline input. A PR author reply is eligible only in an open thread from a marked
+ReviewCTL review. The controller records each command or reply identity and any resulting queue work in one transaction.
+At pass and publication boundaries it reads the active PR's inputs again.
 
 ReviewCTL saves a prepared publication in the `review_publications` table before any GitHub write. The row contains
 the pinned attempt, original accounting, final review body, inline comments, reviewer login, and initial discussion
@@ -169,26 +175,25 @@ snapshot. A retry loads this row and checks GitHub for the review marker before 
 accounting is recorded once, including when the process exits after publication and before the history transaction.
 Successful delivery clears the prepared publication in the history transaction.
 
-Known revision drift, an eligibility rejection, a stale discussion action, or a confirmed GitHub draft rejection also
-retires the prepared publication after recording its original accounting. Uncertain request failures retain it for
-readback and retry.
+Known revision drift before publication retires the prepared payload after recording its original accounting.
+An eligibility rejection stops processing. Stale discussions and confirmed GitHub validation failures can require
+reassessment. An uncertain request failure retains the prepared payload for readback and retry.
 
 ## History
 
-Review history is separate from the queue and never controls scheduling. Each processing attempt records a bounded row
-with:
+Each processing attempt records a history row with:
 
-- pull request identity and reviewed head SHA;
+- pull request identity, round, pass, and reviewed head SHA;
 - start and finish times;
 - success or failure;
 - review verdict when available;
 - published review identifier and URL when available; and
 - a bounded error code and message on failure.
 
-History stores review identifiers and accounting. The separate prepared-publication row retains review text and
-discussion replies until delivery completes. These drafts may contain source excerpts and other review context.
-
-History is append-only for normal operation. Retention and telemetry export are outside the MVP.
+A completed pass moves its report, evidence, reviewed SHA, and prepared draft into the PR's state directory.
+Later passes receive the PR history directory and the explicit previous report path. The controller stores delivery
+outcomes alongside their pass, even after successful delivery clears the prepared-publication row. These files may
+contain source excerpts and other review context.
 
 ## Producer commands
 
@@ -224,35 +229,22 @@ Parallel Codex sessions are outside the MVP. If sequential execution becomes too
 divide its snapshot among a bounded in-memory worker pool. The queue schema does not need leases or worker ownership
 for that change.
 
-## Review attempt
+## Review rounds and passes
 
-One attempt is one Codex execution for one queued pull request. The attempt resolves and pins these values before Codex
-starts:
+Each round gets a durable local number and a unique GitHub publication key. A new round can review the same SHA.
+The controller keeps a saved pass pinned to its reviewed SHA.
 
-```text
-provider + repository + pull request number + head SHA + installed skill digest
-```
+1. Resolve the PR and verify its repository, state, and author.
+2. Read its discussions and any new commands. Honor a pause unless this round has permission to run during it.
+3. Install the locked APM skills in a temporary workspace and hash the installed set.
+4. Run Codex with the pinned SHA, PR history directory, and previous report path.
+5. Save the validated report and referenced evidence. Refresh commands before preparing publication.
+6. Recheck eligibility, revision, and discussions, publish through `gh`, verify readback, and synchronize owned threads.
+7. Record the delivery outcome. Retain the PR in the queue if new work arrived.
 
-The execution path is linear:
-
-1. Resolve the configured pull request and current head through `gh`.
-2. Verify that the repository is configured and the exact author login is trusted.
-3. Create a fresh temporary workspace.
-4. Install the locked APM skills and the bundled review grade skill, then hash the installed set.
-5. Write one trusted instruction.
-6. Run Codex to prepare a draft for the pinned SHA, including proposed actions for owned discussions.
-7. Validate the draft, add the marker and available accounting signature, and save the prepared publication.
-8. Recheck eligibility and the head, publish through `gh`, verify readback, and synchronize owned discussions.
-9. Remove the workspace, record history, and remove the queue entry after confirmed success or an eligibility rejection.
-
-A saved publication resumes before another Codex invocation. An existing marked review is recovered after verifying
-its author, commit, URL, and submitted event. Owned discussions can be reassessed by Codex when another delivery
-attempt has no saved plan.
-
-A reassessment retains its own draft. If it reports independent new findings or changes the verdict of an existing
-review, `review_conflict` preserves that draft and keeps the PR queued for operator assessment. Inline comments always
-count as new findings on this path; the optional draft field `new_findings` also identifies general findings in the
-summary and defaults to false for older saved drafts. Recovery does not replace a new assessment with an old approval.
+Before another Codex invocation, a retry tries the saved publication. It recovers the marked review after verifying
+its author, commit, URL, and event. Publications prepared by older versions retain their SHA-and-skill markers and
+conflict checks.
 
 `APPROVE` and `REQUEST_CHANGES` are valid when the authenticated reviewer did not author the pull request. `COMMENT` is
 valid and required when GitHub forbids a decisive review because the authenticated reviewer authored the pull request.
@@ -306,7 +298,7 @@ Each attempt runs:
 apm install --frozen --root <attempt-workspace> --target codex
 ```
 
-`reviewctl` hashes the installed skill set once and includes the digest in the instruction, marker, draft validation,
+`reviewctl` hashes the installed skill set once and includes the digest in the instruction, draft validation,
 and history. An APM failure stops the attempt before Codex starts and is recorded in history.
 
 Update the checked-in APM lockfile to change the pinned review skills. The bundled grade skill is installed from the
@@ -317,8 +309,8 @@ ReviewCTL binary and participates in the same digest.
 Each attempt uses a new temporary directory. The workspace contains the APM installation, trusted instruction, draft
 path, and source checkout. The implementation uses ordinary temporary-directory creation and recursive removal.
 
-The workspace is deleted after success or failure. A later retry creates a new workspace. SQLite retains history and unfinished publications with their original accounting. Review text is removed from the
-prepared-publication table after delivery completes.
+The workspace is deleted after the pass. The controller keeps the final report and its evidence in the durable
+PR directory. A delivery-only retry reuses the saved pass without creating another analysis workspace.
 
 The MVP does not recover, reuse, fence, reference-count, or selectively clean workspaces. It does not implement custom
 filesystem capabilities or defend against the trusted local user replacing files during execution.
@@ -426,13 +418,10 @@ result, verify stdout and stderr separation, exit codes, deterministic bulk orde
 documented idempotent no-op results.
 
 A local live end-to-end test uses the real GitHub and Codex credentials only on the
-[canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It rechecks the repository, pull request,
-author, open non-draft state, head, and exact marker count before Codex. It accepts zero or one marker and rejects
-duplicates. Every invocation establishes the discovery baseline and records one publication-disabled retryable
-failure. With zero markers, it verifies a published `COMMENT` review; with one marker, it verifies recovery. Both modes
-enqueue the fixture again and verify another recovery without duplicate publication. Missing live prerequisites block
-this test rather than turning it into a passing skip. The first zero-marker run proves publication; later runs prove
-recovery without requiring a fixture head change.
+[canonical fixture PR](https://github.com/denifilatoff/reviewctl/pull/24). It verifies its author, open non-draft
+state, head, and absence of duplicate markers before Codex. The test checks the new round's `COMMENT` review, restores
+the saved publication in its isolated SQLite state, and verifies recovery without another review. Missing live
+prerequisites fail the test.
 
 ## Non-goals
 

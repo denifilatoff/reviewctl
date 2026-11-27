@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ type reviewControl struct {
 	Manual       bool
 	Requested    bool
 	RoundID      int64
+	RoundKey     string
 	LastRoundID  int64
 	PermitPaused bool
 	RetiredPass  int
@@ -69,29 +71,30 @@ func (s *Store) reviewAllowed(ctx context.Context, pr PullRequest) (bool, error)
 	return !state.Paused || state.Manual || state.PermitPaused, err
 }
 
-func (s *Store) startReviewRound(ctx context.Context, pr PullRequest) (int64, error) {
+func (s *Store) startReviewRound(ctx context.Context, pr PullRequest) (reviewControl, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return reviewControl{}, err
 	}
 	defer tx.Rollback()
 	state, _, err := readReviewControl(ctx, tx, pr)
 	if err != nil {
-		return 0, err
+		return reviewControl{}, err
 	}
 	if state.Paused && !state.Manual && !state.PermitPaused {
-		return 0, nil
+		return reviewControl{}, nil
 	}
 	if state.RoundID == 0 {
 		state.LastRoundID++
 		state.RoundID = state.LastRoundID
+		state.RoundKey = rand.Text()
 	}
 	state.PermitPaused = state.PermitPaused || (state.Paused && state.Manual)
 	state.Manual, state.Requested = false, false
 	if err := saveReviewControl(ctx, tx, pr, state); err != nil {
-		return 0, err
+		return reviewControl{}, err
 	}
-	return state.RoundID, tx.Commit()
+	return state, tx.Commit()
 }
 
 func reviewCommandAction(body string) string {

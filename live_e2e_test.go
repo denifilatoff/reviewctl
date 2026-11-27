@@ -19,11 +19,10 @@ func TestLiveE2EMarkerPublicationContract(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		initialMarker string
-		wantMode      string
 		wantSuccess   bool
 	}{
-		{name: "publishes then recovers", initialMarker: "0", wantMode: "publication", wantSuccess: true},
-		{name: "recovers twice on later run", initialMarker: "1", wantMode: "recovery", wantSuccess: true},
+		{name: "publishes then recovers", initialMarker: "0", wantSuccess: true},
+		{name: "publishes a new round after an earlier review", initialMarker: "1", wantSuccess: true},
 		{name: "rejects duplicate markers", initialMarker: "2"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -38,7 +37,7 @@ func TestLiveE2EMarkerPublicationContract(t *testing.T) {
 				t.Fatalf("live script accepted duplicate markers:\n%s", output)
 			}
 			if test.wantSuccess {
-				if !strings.Contains(string(output), "mode="+test.wantMode) {
+				if !strings.Contains(string(output), "marked_reviews=1") {
 					t.Fatalf("live mode output = %q", output)
 				}
 				assertLiveCallOrder(t, calls)
@@ -156,8 +155,8 @@ func assertLiveCallOrder(t *testing.T, path string) {
 		"reviewctl baseline", "sqlite baseline", "reviewctl unchanged discovery", "sqlite unchanged discovery queue",
 		"reviewctl enqueue", "reviewctl safe failure",
 		"sqlite retry history", "sqlite retry queue", "reviewctl doctor", "gh markers",
-		"reviewctl first success", "gh markers", "gh head readback",
-		"reviewctl enqueue", "reviewctl recovery", "gh markers", "gh head readback", "sqlite history",
+		"reviewctl first success", "sqlite saved round", "gh markers", "gh head readback",
+		"sqlite restore publication", "reviewctl enqueue", "reviewctl recovery", "gh markers", "gh head readback", "sqlite history",
 		"sqlite successes", "sqlite failures", "sqlite queue",
 	}, "\n") + "\n"
 	if string(data) != want {
@@ -199,7 +198,9 @@ func TestLiveE2EHelper(t *testing.T) {
 }
 
 func helperLiveGH(args []string) {
-	markerQuery := fmt.Sprintf(".[] | select(.body != null and (.body | contains(\"<!-- reviewctl:github:denifilatoff/reviewctl#24:%s:sha256:test --\u003e\"))) | .id", liveFixtureHead)
+	const allMarkers = `.[] | (.body // "") | scan("<!-- reviewctl:github:denifilatoff/reviewctl#24:[^ >]+ -->")`
+	markerQuery := fmt.Sprintf(`.[] | select(.commit_id == "%s" and .body != null and (.body | contains("<!-- reviewctl:github:denifilatoff/reviewctl#24:round:TESTROUNDKEY -->"))) | .id`, liveFixtureHead)
+
 	switch {
 	case sameArgs(args, "auth", "status"):
 		appendLiveCall("gh auth")
@@ -213,7 +214,8 @@ func helperLiveGH(args []string) {
 	case sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24", "--jq", ".head.sha"):
 		appendLiveCall("gh REST head")
 		fmt.Println(liveFixtureHead)
-	case sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24/reviews", "--paginate", "--jq", markerQuery):
+	case sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24/reviews", "--paginate", "--jq", markerQuery),
+		sameArgs(args, "api", "repos/denifilatoff/reviewctl/pulls/24/reviews", "--paginate", "--jq", allMarkers):
 		appendLiveCall("gh markers")
 		if want := os.Getenv("REVIEWCTL_LIVE_EXPECT_GH_CONFIG_DIR"); want != "" && os.Getenv("GH_CONFIG_DIR") != want {
 			os.Exit(85)
@@ -221,8 +223,12 @@ func helperLiveGH(args []string) {
 		if os.Getenv("REVIEWCTL_LIVE_FAIL_MARKERS") == "1" {
 			os.Exit(81)
 		}
-		for i := 0; i < readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")); i++ {
-			fmt.Println(i + 1)
+		if args[4] == allMarkers {
+			for range readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE")) {
+				fmt.Println("<!-- reviewctl:github:denifilatoff/reviewctl#24:round:EARLIER -->")
+			}
+		} else {
+			fmt.Println(123)
 		}
 	case sameArgs(args, "pr", "view", liveFixtureURL, "--json", "headRefOid", "--jq", ".headRefOid"):
 		appendLiveCall("gh head readback")
@@ -274,7 +280,15 @@ func helperLiveSQLite(args []string) {
 			os.Exit(81)
 		}
 	default:
-		os.Exit(81)
+		switch {
+		case strings.HasPrefix(args[1], "SELECT json_extract(readfile("):
+			appendLiveCall("sqlite saved round")
+			fmt.Println("TESTROUNDKEY")
+		case strings.HasPrefix(args[1], "INSERT INTO review_publications("):
+			appendLiveCall("sqlite restore publication")
+		default:
+			os.Exit(81)
+		}
 	}
 }
 
@@ -310,14 +324,12 @@ func helperLiveReviewctl(args []string) {
 		os.Exit(1)
 	case 3:
 		appendLiveCall("reviewctl first success")
-		markers := readTestCounter(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE"))
-		recovered := markers > 0
-		if markers == 0 {
-			if os.WriteFile(os.Getenv("REVIEWCTL_LIVE_MARKER_STATE"), []byte("1"), 0o600) != nil {
-				os.Exit(84)
-			}
+		dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "reviewctl", "reviews", "github", "denifilatoff",
+			"reviewctl", "24", "rounds", "000000000001", "passes", "000001")
+		if os.MkdirAll(dir, 0o700) != nil || os.WriteFile(filepath.Join(dir, "pass.json"), []byte("{}"), 0o600) != nil {
+			os.Exit(84)
 		}
-		fmt.Printf("{\"command\":\"run\",\"verdict\":\"COMMENT\",\"recovered\":%t}\n", recovered)
+		fmt.Println(`{"command":"run","verdict":"COMMENT","recovered":false}`)
 	case 4:
 		appendLiveCall("reviewctl recovery")
 		fmt.Println(`{"command":"run","verdict":"COMMENT","recovered":true}`)

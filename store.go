@@ -20,6 +20,7 @@ type Store struct {
 type Attempt struct {
 	PullRequest
 	RoundID      int64       `json:"round_id,omitempty"`
+	RoundKey     string      `json:"round_key,omitempty"`
 	Pass         int         `json:"pass,omitempty"`
 	Held         bool        `json:"held,omitempty"`
 	Cost         *ReviewCost `json:"cost,omitempty"`
@@ -430,7 +431,7 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	if known && state.RoundID == attempt.RoundID {
 		switch {
 		case removeFromQueue || roundNeedsReassessment:
-			state.RoundID, state.RetiredPass, state.PermitPaused = 0, 0, false
+			state.RoundID, state.RoundKey, state.RetiredPass, state.PermitPaused = 0, "", 0, false
 		case retirePass:
 			state.RetiredPass = max(state.RetiredPass, attempt.Pass)
 		}

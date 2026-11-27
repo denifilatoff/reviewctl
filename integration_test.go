@@ -1819,8 +1819,17 @@ func helperGH(args []string) {
 			fmt.Print(`{"data":{}}`)
 			return
 		}
+		fields := make(map[string]string)
+		for _, arg := range args[2:] {
+			if name, value, ok := strings.Cut(arg, "="); ok {
+				fields[name] = value
+			}
+		}
 		nodes := []any{}
 		for _, thread := range threads {
+			if id := fields["id"]; id != "" && thread.ID != id {
+				continue
+			}
 			comments := []any{}
 			for _, comment := range thread.Comments {
 				var replyTo any
@@ -1831,29 +1840,24 @@ func helperGH(args []string) {
 					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo,
 					"createdAt": comment.CreatedAt, "pullRequestReview": map[string]string{"body": comment.ReviewBody}})
 			}
-			nodes = append(nodes, map[string]any{
-				"id": thread.ID, "isResolved": thread.IsResolved,
-				"comments": map[string]any{
-					"nodes":    comments,
-					"pageInfo": map[string]bool{"hasNextPage": false},
-				},
-			})
-		}
-		for _, arg := range args {
-			if id, ok := strings.CutPrefix(arg, "id="); ok {
-				if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
-					fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
-					os.Exit(1)
-				}
-				var node any
-				for _, candidate := range nodes {
-					if candidate.(map[string]any)["id"] == id {
-						node = candidate
-					}
-				}
-				json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
-				return
+			commentCursor := ""
+			if fields["id"] != "" {
+				commentCursor = fields["after"]
 			}
+			nodes = append(nodes, map[string]any{"id": thread.ID, "isResolved": thread.IsResolved,
+				"comments": fakeGHReviewPage(comments, commentCursor)})
+		}
+		if fields["id"] != "" {
+			if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
+				fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
+				os.Exit(1)
+			}
+			var node any
+			if len(nodes) > 0 {
+				node = nodes[0]
+			}
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
+			return
 		}
 		if count := os.Getenv("REVIEWCTL_FAKE_THREAD_READS"); count != "" {
 			if os.WriteFile(count, []byte(strconv.Itoa(readTestCounter(count)+1)), 0o600) != nil {
@@ -1862,7 +1866,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
-				"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": false}},
+				"reviewThreads": fakeGHReviewPage(nodes, fields["after"]),
 			}}},
 		})
 		return

@@ -127,7 +127,7 @@ func TestAuthorReplySchedulesSameHeadRoundOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := time.Now().UTC().Add(time.Second)
-	root := githubReviewComment{DatabaseID: 1, Author: "reviewer", ReviewBody: (Attempt{PullRequest: pr, RoundID: 1}).publicationMarker()}
+	root := githubReviewComment{DatabaseID: 1, Author: "reviewer", ReviewBody: (Attempt{PullRequest: pr, RoundID: 1, RoundKey: "fixture-round"}).publicationMarker()}
 	reply := githubReviewComment{DatabaseID: 2, Author: snapshot.Author, ReplyToID: 1, Body: "This edge case still fails.", CreatedAt: created}
 	writeRoundFixture(t, filepath.Join(temp, "published.threads.json"), []githubReviewThread{
 		{ID: "owned", Comments: []githubReviewComment{root, reply}},
@@ -148,6 +148,34 @@ func TestAuthorReplySchedulesSameHeadRoundOnce(t *testing.T) {
 	state, _, err := readReviewControl(ctx, store.db, pr)
 	if err != nil || state.Requested {
 		t.Errorf("replayed reply state=%+v, err=%v; want no follow-up request", state, err)
+	}
+}
+
+func TestLegacyPreparedPublicationAndNewRoundUseDistinctMarkers(t *testing.T) {
+	cfg, pr, store, temp := publicationFixture(t)
+	ctx := context.Background()
+	resolved, err := resolveGitHub(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := Attempt{PullRequest: pr, HeadSHA: resolved.HeadSHA, SkillDigest: "sha256:legacy", StartedAt: time.Now().UTC()}
+	draft := ReviewDraft{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number, HeadSHA: legacy.HeadSHA,
+		SkillDigest: legacy.SkillDigest, Verdict: "APPROVE", Body: "Legacy review\n\n" + legacy.publicationMarker(),
+		Comments: []ReviewComment{}, Discussions: []DiscussionAction{}}
+	if err := store.savePublication(ctx, Publication{Attempt: legacy, Draft: draft, Login: "reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	original := ProcessAttempt(ctx, cfg, store, pr)
+	if !original.Success || original.RoundID != 0 {
+		t.Fatalf("legacy delivery = %+v, want a successful legacy review", original)
+	}
+	if err := store.Finish(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	modern := ProcessAttempt(ctx, cfg, store, pr)
+	if !modern.Success || modern.RoundID != 1 || modern.RoundKey == "" || modern.ReviewID == original.ReviewID ||
+		modern.HeadSHA != original.HeadSHA || readTestCounter(filepath.Join(temp, "codex-calls")) != 1 {
+		t.Errorf("new same-SHA round = %+v; want a new review and one agent invocation after legacy review %s", modern, original.ReviewID)
 	}
 }
 

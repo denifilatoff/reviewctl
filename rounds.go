@@ -49,7 +49,8 @@ func (s *Store) latestRoundPass(attempt Attempt) (*Publication, error) {
 			return nil, err
 		}
 		if pass.Attempt.PullRequest != attempt.PullRequest || pass.Attempt.RoundID != attempt.RoundID ||
-			pass.Attempt.Pass != number || pass.Attempt.HeadSHA == "" {
+			pass.Attempt.Pass != number || pass.Attempt.HeadSHA == "" ||
+			(attempt.RoundKey != "" && pass.Attempt.RoundKey != attempt.RoundKey) {
 			return nil, fmt.Errorf("saved pass does not match its pull request, round, and pass")
 		}
 		return &pass, nil
@@ -72,7 +73,7 @@ func (s *Store) previousReviewPass(attempt Attempt) (*Publication, error) {
 			continue
 		}
 		previous := attempt
-		previous.RoundID = number
+		previous.RoundID, previous.RoundKey = number, ""
 		pass, err := s.latestRoundPass(previous)
 		if err != nil || pass != nil {
 			return pass, err
@@ -160,8 +161,12 @@ func copyReviewArtifacts(source, destination string) error {
 				return err
 			}
 			remaining -= int64(len(data))
-			if remaining < 0 || !json.Valid(data) {
-				return fmt.Errorf("review.json is invalid or exceeds the artifact size limit of %d bytes", maxArtifactBytes)
+			if remaining < 0 {
+				return fmt.Errorf("review artifacts exceed %d bytes", maxArtifactBytes)
+			}
+			var report map[string]json.RawMessage
+			if err := json.Unmarshal(data, &report); err != nil || report == nil {
+				return fmt.Errorf("review.json must contain a JSON object")
 			}
 			return os.WriteFile(target, data, 0o600)
 		}
