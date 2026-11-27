@@ -18,8 +18,10 @@ For a catch-up pass, use the two commits supplied by the controller as the trans
 findings at the pinned head. Include affected code outside the transition diff. Use the full pinned PR diff when
 the transition or earlier evidence leaves a coverage gap. Use the pinned PR diff for GitHub inline locations.
 
-Use the installed `review-delivery` schema to write `review.json`, then convert that result to the JSON draft in
-the controller's instruction. ReviewCTL handles delivery.
+Use the installed `review-delivery` schema to write the final `review.json` at the path in the controller's instruction,
+then convert that result to the controller's JSON draft. Use its previous report as the skill's previous input.
+Keep evidence files referenced by the final report under the evidence directory. Use paths relative to the report.
+ReviewCTL handles delivery.
 
 - Carry over the skill's result. For incomplete reviews, report the material coverage gap instead of proposing
   any publication or discussion actions.

@@ -142,7 +142,7 @@ func publishSignature(ctx context.Context, cfg Config, attempt Attempt) error {
 	if err := githubJSON(ctx, []string{endpoint}, nil, &review); err != nil {
 		return err
 	}
-	marker := reviewMarker(attempt.PullRequest, attempt.HeadSHA, attempt.SkillDigest)
+	marker := attempt.publicationMarker()
 	if review.ID != id || review.Commit != attempt.HeadSHA || review.URL != attempt.ReviewURL ||
 		normalizeGitHubLogin(review.User.Login) != login || !strings.Contains(review.Body, marker) {
 		return fmt.Errorf("submitted review does not match the recorded attempt and authenticated reviewer")

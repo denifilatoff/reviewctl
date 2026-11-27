@@ -43,13 +43,11 @@ type DiscussionAction struct {
 }
 
 type Publication struct {
-	Attempt            Attempt
-	Draft              ReviewDraft
-	Login              string
-	Threads            []githubReviewThread
-	ExistingReviewID   int64
-	ObservedHeadSHA    string
-	RecoverAcrossHeads bool
+	Attempt          Attempt
+	Draft            ReviewDraft
+	Login            string
+	Threads          []githubReviewThread
+	ExistingReviewID int64
 }
 
 func readDraft(filePath string) (ReviewDraft, error) {
@@ -174,17 +172,18 @@ func (s *Store) savePublication(ctx context.Context, publication Publication) er
 	return err
 }
 
-func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, digest, login string, selfAuthored bool) (submittedReview, error) {
+func readPublishedReview(ctx context.Context, attempt Attempt, id int64, login string, selfAuthored bool) (submittedReview, error) {
+	pr := attempt.PullRequest
 	var review submittedReview
 	endpoint := fmt.Sprintf("repos/%s/pulls/%d/reviews/%d", pr.Repository, pr.Number, id)
 	if err := githubJSON(ctx, []string{endpoint}, nil, &review); err != nil {
 		return review, err
 	}
 	verdict := map[string]string{"APPROVED": "APPROVE", "CHANGES_REQUESTED": "REQUEST_CHANGES", "COMMENTED": "COMMENT"}[review.State]
-	receipt := Receipt{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number, HeadSHA: head,
-		SkillDigest: digest, Verdict: verdict, ReviewID: json.Number(strconv.FormatInt(id, 10)), ReviewURL: review.URL}
-	if review.ID != id || review.Commit != head || normalizeGitHubLogin(review.User.Login) != login ||
-		!strings.Contains(review.Body, reviewMarker(pr, head, digest)) {
+	receipt := Receipt{Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number, HeadSHA: attempt.HeadSHA,
+		SkillDigest: attempt.SkillDigest, Verdict: verdict, ReviewID: json.Number(strconv.FormatInt(id, 10)), ReviewURL: review.URL}
+	if review.ID != id || review.Commit != attempt.HeadSHA || normalizeGitHubLogin(review.User.Login) != login ||
+		!strings.Contains(review.Body, attempt.publicationMarker()) {
 		return review, fmt.Errorf("submitted review does not match the pinned attempt and authenticated reviewer")
 	}
 	prURL, rawID, validURL := strings.Cut(review.URL, "#pullrequestreview-")
@@ -194,7 +193,7 @@ func readPublishedReview(ctx context.Context, pr PullRequest, id int64, head, di
 	if review.State == "DISMISSED" {
 		return review, fail("review_dismissed", "published review %d was dismissed", id)
 	}
-	if err := ValidateReceipt(receipt, pr, head, digest, selfAuthored); err != nil {
+	if err := ValidateReceipt(receipt, pr, attempt.HeadSHA, attempt.SkillDigest, selfAuthored); err != nil {
 		return review, err
 	}
 	return review, nil
@@ -242,8 +241,8 @@ func isGitHubValidationError(err error) bool {
 func deliverPublication(ctx context.Context, cfg Config, publication Publication) (Attempt, error) {
 	result := publication.Attempt
 	pr := result.PullRequest
-	if publication.ObservedHeadSHA != "" && (!publication.RecoverAcrossHeads ||
-		publication.ObservedHeadSHA == result.HeadSHA || publication.Draft.Verdict != "COMMENT") {
+	if result.ObservedHeadSHA != "" && (result.RoundID == 0 ||
+		result.ObservedHeadSHA == result.HeadSHA || publication.Draft.Verdict != "COMMENT") {
 		return result, fmt.Errorf("stale publication requires a COMMENT and a distinct observed head")
 	}
 	current, err := publication.targetAfterStart(ctx, cfg)
@@ -257,7 +256,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 	if login != publication.Login {
 		return result, fmt.Errorf("authenticated reviewer differs from the saved publication")
 	}
-	marker := reviewMarker(pr, result.HeadSHA, result.SkillDigest)
+	marker := result.publicationMarker()
 	id, err := findMarkerReview(ctx, pr, marker)
 	if err != nil {
 		return result, err
@@ -267,7 +266,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 		return result, fmt.Errorf("saved review is missing or its marker changed")
 	}
 	if id == 0 {
-		if publication.ObservedHeadSHA == "" && current.HeadSHA != result.HeadSHA {
+		if result.ObservedHeadSHA == "" && current.HeadSHA != result.HeadSHA {
 			return result, fail("head_changed", "pull request head changed; reassess the current revision")
 		}
 		threads, err := listGitHubReviewThreads(ctx, pr)
@@ -278,7 +277,7 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 			return result, err
 		}
 		head := result.HeadSHA
-		if publication.ObservedHeadSHA != "" {
+		if result.ObservedHeadSHA != "" {
 			head = ""
 		}
 		if _, err := resolvePublicationTarget(ctx, cfg, pr, head); err != nil {
@@ -302,14 +301,14 @@ func deliverPublication(ctx context.Context, cfg Config, publication Publication
 			return result, fmt.Errorf("GitHub returned no published review ID")
 		}
 	}
-	commentExpected := login == normalizeGitHubLogin(current.Author) || publication.ObservedHeadSHA != ""
-	review, err := readPublishedReview(ctx, pr, id, result.HeadSHA, result.SkillDigest, login, commentExpected)
+	commentExpected := login == normalizeGitHubLogin(current.Author) || result.ObservedHeadSHA != ""
+	review, err := readPublishedReview(ctx, result, id, login, commentExpected)
 	dismissedAfterPush := false
 	if err != nil {
 		var coded *codedError
 		if errors.As(err, &coded) && coded.code == "review_dismissed" {
 			latest, lookupErr := resolvePublicationTarget(ctx, cfg, pr, "")
-			if lookupErr == nil && latest.HeadSHA != result.HeadSHA && !publication.RecoverAcrossHeads {
+			if lookupErr == nil && latest.HeadSHA != result.HeadSHA && result.RoundID == 0 {
 				result.ReviewID, result.ReviewURL = strconv.FormatInt(id, 10), review.URL
 				return result, fail("head_changed", "a newer pull request head dismissed the published review")
 			}

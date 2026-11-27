@@ -334,27 +334,6 @@ func TestValidateDiscussionOutcomesRejectsUnownedThreadMutationsButAllowsNewFind
 	}
 }
 
-func TestDecodeGitHubReviewThreadsPreservesOwnershipRepliesAndState(t *testing.T) {
-	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"thread","isResolved":true,"comments":{"nodes":[{"databaseId":1,"author":{"login":"reviewer"},"replyTo":null,"body":"finding"},{"databaseId":2,"author":{"login":"reviewer"},"replyTo":{"databaseId":1},"body":"reply"}],"pageInfo":{"hasNextPage":false}}}],"pageInfo":{"hasNextPage":false}}}}}}`)
-
-	threads, err := decodeGitHubReviewThreads(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(threads) != 1 || threads[0].ID != "thread" || !threads[0].IsResolved ||
-		len(threads[0].Comments) != 2 || threads[0].Comments[1].ReplyToID != 1 ||
-		threads[0].Comments[0].Body != "finding" || threads[0].Comments[1].Body != "reply" {
-		t.Fatalf("decoded threads = %+v", threads)
-	}
-}
-
-func TestDecodeGitHubReviewThreadsRejectsIncompletePagination(t *testing.T) {
-	payload := []byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":true}}}}}}`)
-	if _, err := decodeGitHubReviewThreads(payload); err == nil {
-		t.Fatal("accepted a partial review-thread page")
-	}
-}
-
 func TestValidateReceiptAcceptsCommentForSelfAuthoredPR(t *testing.T) {
 	pr, _ := ParsePullRequestURL("https://github.com/acme/service/pull/7")
 	receipt := Receipt{

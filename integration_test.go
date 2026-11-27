@@ -992,8 +992,9 @@ repositories:
 		t.Fatalf("re-enqueue: %+v", result)
 	}
 	result = runCLI(t, env, binary, "--json", "run")
-	if result.exitCode != 0 || !strings.Contains(result.stdout, `"recovered":true`) {
-		t.Fatalf("marker recovery result: %+v", result)
+	if result.exitCode != 0 || !strings.Contains(result.stdout, `"recovered":false`) ||
+		readTestCounter(filepath.Join(temp, "published.posts")) != 2 {
+		t.Fatalf("same-head round result: %+v", result)
 	}
 
 	failedURL := "https://github.com/acme/service/pull/8"
@@ -1340,7 +1341,7 @@ func TestProcessAttemptAcceptsVerifiedOwnedDiscussionOutcome(t *testing.T) {
 	}
 }
 
-func TestProcessAttemptRecoversWithoutAgentReportedState(t *testing.T) {
+func TestProcessAttemptPublishesASecondRoundOnTheSameHead(t *testing.T) {
 	temp := t.TempDir()
 	fakeBin := installProcessHelpers(t, temp)
 	t.Setenv("GO_WANT_REVIEWCTL_HELPER", "1")
@@ -1363,8 +1364,8 @@ func TestProcessAttemptRecoversWithoutAgentReportedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	result = ProcessAttempt(context.Background(), cfg, store, pr)
-	if !result.Success || !result.Recovered || result.Cost != nil {
-		t.Fatalf("controller recovery result: %+v", result)
+	if !result.Success || result.Recovered || result.RoundID != 2 || result.ReviewID == "123" {
+		t.Fatalf("same-head round = %+v, want a separate review", result)
 	}
 }
 
@@ -1607,18 +1608,24 @@ func TestCodexDescendantProcess(t *testing.T) {
 }
 
 func helperGit(args []string) {
-	const head = "0123456789abcdef0123456789abcdef01234567"
 	state := os.Getenv("REVIEWCTL_FAKE_GIT_STATE")
-	if len(args) == 5 && args[0] == "-C" && args[2] == "fetch" && args[3] == "origin" &&
-		args[4] == "refs/pull/7/head" {
+	if len(args) == 5 && args[0] == "-C" && args[2] == "fetch" && args[3] == "origin" {
+		head := args[4]
+		if head == "refs/pull/7/head" {
+			head = fakeCatchUpHead("0123456789abcdef0123456789abcdef01234567")
+		}
 		if os.WriteFile(state, []byte(head), 0o600) != nil {
 			os.Exit(96)
 		}
 		return
 	}
-	if len(args) == 5 && args[0] == "-C" && args[2] == "checkout" && args[3] == "--detach" && args[4] == head {
+	if len(args) == 6 && args[0] == "-C" && args[2] == "merge-base" && args[3] == "--is-ancestor" &&
+		os.Getenv("REVIEWCTL_FAKE_HEADS_AFTER_CODEX") != "" {
+		return
+	}
+	if len(args) == 5 && args[0] == "-C" && args[2] == "checkout" && args[3] == "--detach" {
 		fetched, err := os.ReadFile(state)
-		if err != nil || string(fetched) != head {
+		if err != nil || string(fetched) != args[4] {
 			os.Exit(97)
 		}
 		if os.Remove(state) != nil {
@@ -1645,7 +1652,8 @@ func helperGH(args []string) {
 		if json.Unmarshal(data, &request) != nil || request.Commit == "" {
 			os.Exit(76)
 		}
-		if os.Getenv("REVIEWCTL_FAKE_REJECT_POST") != "" {
+		if os.Getenv("REVIEWCTL_FAKE_REJECT_POST") != "" ||
+			(os.Getenv("REVIEWCTL_FAKE_REJECT_STALE_INLINE") != "" && request.Event == "COMMENT" && len(request.Comments) != 0) {
 			fmt.Print(`{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","field":"comments","code":"invalid"}],"status":"422"}`)
 			fmt.Fprintln(os.Stderr, "gh: Validation Failed (HTTP 422)")
 			os.Exit(1)
@@ -1654,8 +1662,17 @@ func helperGH(args []string) {
 		if len(parts) != 6 {
 			os.Exit(76)
 		}
-		review := submittedReview{ID: 123, Commit: request.Commit, Body: request.Body,
-			URL:   fmt.Sprintf("https://github.com/%s/%s/pull/%s#pullrequestreview-123", parts[1], parts[2], parts[4]),
+		previous, previousErr := os.ReadFile(state + ".review.json")
+		if previousErr == nil {
+			var saved submittedReview
+			if json.Unmarshal(previous, &saved) != nil ||
+				os.WriteFile(fmt.Sprintf("%s.review-%d.json", state, saved.ID), previous, 0o600) != nil {
+				os.Exit(76)
+			}
+		}
+		id := int64(123 + readTestCounter(state+".posts"))
+		review := submittedReview{ID: id, Commit: request.Commit, Body: request.Body,
+			URL:   fmt.Sprintf("https://github.com/%s/%s/pull/%s#pullrequestreview-%d", parts[1], parts[2], parts[4], id),
 			State: map[string]string{"APPROVE": "APPROVED", "REQUEST_CHANGES": "CHANGES_REQUESTED", "COMMENT": "COMMENTED"}[request.Event]}
 		review.User.Login = os.Getenv("REVIEWCTL_FAKE_LOGIN")
 		if review.User.Login == "" {
@@ -1671,7 +1688,7 @@ func helperGH(args []string) {
 			reviewComments = append(reviewComments, reviewComment{comment, review.ID})
 		}
 		comments, _ := json.Marshal([][]reviewComment{reviewComments})
-		for name, contents := range map[string][]byte{state: []byte("123"), state + ".review.json": encoded,
+		for name, contents := range map[string][]byte{state: []byte(strconv.FormatInt(id, 10)), state + ".review.json": encoded,
 			state + ".request.json": data, state + ".comments.json": comments,
 			state + ".posts": []byte(strconv.Itoa(readTestCounter(state+".posts") + 1))} {
 			if os.WriteFile(name, contents, 0o600) != nil {
@@ -1756,6 +1773,32 @@ func helperGH(args []string) {
 		os.Stdout.Write(data)
 		return
 	}
+	if len(args) == 4 && args[0] == "api" && strings.Contains(args[1], "/issues/") &&
+		strings.Contains(args[1], "/comments?per_page=100&since=") && args[2] == "--paginate" && args[3] == "--slurp" {
+		data, err := os.ReadFile(state + ".issue-comments.json")
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Print("[[]]")
+			return
+		}
+		if err != nil {
+			os.Exit(76)
+		}
+		os.Stdout.Write(data)
+		return
+	}
+	if len(args) == 4 && args[0] == "api" && strings.Contains(args[1], "/pulls/comments?per_page=100&since=") {
+		data, err := os.ReadFile(state + ".review-inputs.json")
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Print("[[]]")
+			return
+		}
+		if err != nil {
+			os.Exit(76)
+		}
+		os.Stdout.Write(data)
+		return
+	}
+
 	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
 		threads := fakeGHThreads()
 		if len(args) >= 4 && args[2] == "--input" {
@@ -1783,8 +1826,17 @@ func helperGH(args []string) {
 			fmt.Print(`{"data":{}}`)
 			return
 		}
+		fields := make(map[string]string)
+		for _, arg := range args[2:] {
+			if name, value, ok := strings.Cut(arg, "="); ok {
+				fields[name] = value
+			}
+		}
 		nodes := []any{}
 		for _, thread := range threads {
+			if id := fields["id"]; id != "" && thread.ID != id {
+				continue
+			}
 			comments := []any{}
 			for _, comment := range thread.Comments {
 				var replyTo any
@@ -1792,31 +1844,27 @@ func helperGH(args []string) {
 					replyTo = map[string]int64{"databaseId": comment.ReplyToID}
 				}
 				comments = append(comments, map[string]any{"databaseId": comment.DatabaseID, "body": comment.Body,
-					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo})
+					"author": map[string]string{"login": comment.Author}, "replyTo": replyTo,
+					"createdAt": comment.CreatedAt, "pullRequestReview": map[string]string{"body": comment.ReviewBody}})
 			}
-			nodes = append(nodes, map[string]any{
-				"id": thread.ID, "isResolved": thread.IsResolved,
-				"comments": map[string]any{
-					"nodes":    comments,
-					"pageInfo": map[string]bool{"hasNextPage": false},
-				},
-			})
+			commentCursor := ""
+			if fields["id"] != "" {
+				commentCursor = fields["after"]
+			}
+			nodes = append(nodes, map[string]any{"id": thread.ID, "isResolved": thread.IsResolved,
+				"comments": fakeGHReviewPage(comments, commentCursor)})
 		}
-		for _, arg := range args {
-			if id, ok := strings.CutPrefix(arg, "id="); ok {
-				if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
-					fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
-					os.Exit(1)
-				}
-				var node any
-				for _, candidate := range nodes {
-					if candidate.(map[string]any)["id"] == id {
-						node = candidate
-					}
-				}
-				json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
-				return
+		if fields["id"] != "" {
+			if os.Getenv("REVIEWCTL_FAKE_REPLY_READBACK_FAILURE") != "" && readTestCounter(state+".reply-attempts") > 0 {
+				fmt.Fprintln(os.Stderr, "gh: readback unavailable (HTTP 502)")
+				os.Exit(1)
 			}
+			var node any
+			if len(nodes) > 0 {
+				node = nodes[0]
+			}
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"data": map[string]any{"node": node}})
+			return
 		}
 		if count := os.Getenv("REVIEWCTL_FAKE_THREAD_READS"); count != "" {
 			if os.WriteFile(count, []byte(strconv.Itoa(readTestCounter(count)+1)), 0o600) != nil {
@@ -1825,7 +1873,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
-				"reviewThreads": map[string]any{"nodes": nodes, "pageInfo": map[string]bool{"hasNextPage": false}},
+				"reviewThreads": fakeGHReviewPage(nodes, fields["after"]),
 			}}},
 		})
 		return
@@ -1841,7 +1889,20 @@ func helperGH(args []string) {
 		if err != nil {
 			os.Exit(76)
 		}
-		fmt.Printf("[[%s]]", data)
+		var reviews []json.RawMessage
+		previous, err := filepath.Glob(state + ".review-*.json")
+		if err != nil {
+			os.Exit(76)
+		}
+		for _, path := range previous {
+			old, err := os.ReadFile(path)
+			if err != nil {
+				os.Exit(76)
+			}
+			reviews = append(reviews, old)
+		}
+		reviews = append(reviews, data)
+		json.NewEncoder(os.Stdout).Encode([][]json.RawMessage{reviews})
 		return
 	}
 	for _, arg := range args {
@@ -1854,6 +1915,14 @@ func helperGH(args []string) {
 			var review submittedReview
 			if json.Unmarshal(data, &review) != nil {
 				os.Exit(76)
+			}
+			rawID := filepath.Base(arg)
+			if rawID != strconv.FormatInt(review.ID, 10) {
+				path = state + ".review-" + rawID + ".json"
+				data, err = os.ReadFile(path)
+				if err != nil || json.Unmarshal(data, &review) != nil {
+					os.Exit(76)
+				}
 			}
 			if len(args) > 2 && args[1] == "--method" && args[2] == "PUT" {
 				var body struct {
@@ -2018,7 +2087,7 @@ func helperGH(args []string) {
 		}
 		json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"url": args[2], "number": number, "state": state, "isDraft": os.Getenv("REVIEWCTL_FAKE_PR_DRAFT") != "",
-			"headRefOid": head, "author": map[string]string{"login": author},
+			"headRefOid": fakeCatchUpHead(head), "author": map[string]string{"login": author},
 		})
 		return
 	}
@@ -2265,6 +2334,21 @@ func helperCodex(args []string) {
 	}
 	if receiptPath == "" || os.WriteFile(receiptPath, data, 0o600) != nil {
 		os.Exit(95)
+	}
+	if path := fields["Review report path"]; path != "" {
+		report, _ := json.Marshal(map[string]any{"head": draft.HeadSHA, "findings": []any{}})
+		evidence := fields["Evidence directory"]
+		if os.WriteFile(path, report, 0o600) != nil || os.MkdirAll(evidence, 0o700) != nil ||
+			os.WriteFile(filepath.Join(evidence, "verification.txt"), []byte(draft.HeadSHA), 0o600) != nil ||
+			os.WriteFile(filepath.Join(filepath.Dir(path), "axis.json"), []byte("{}"), 0o600) != nil {
+			os.Exit(95)
+		}
+	}
+	advanceFakeCatchUpHead()
+	if commands := os.Getenv("REVIEWCTL_FAKE_COMMAND_AFTER_CODEX"); commands != "" {
+		if os.WriteFile(os.Getenv("REVIEWCTL_FAKE_STATE")+".issue-comments.json", []byte(commands), 0o600) != nil {
+			os.Exit(95)
+		}
 	}
 	if jsonMode {
 		fmt.Println(`{"type":"thread.started","thread_id":"fake-root"}`)

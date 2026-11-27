@@ -9,7 +9,10 @@ import (
 )
 
 func discussionReplyBody(publication Publication, action DiscussionAction) string {
-	seed := reviewMarker(publication.Attempt.PullRequest, publication.Attempt.HeadSHA, publication.Attempt.SkillDigest) + publication.Attempt.StartedAt.String()
+	seed := publication.Attempt.publicationMarker()
+	if publication.Attempt.RoundID == 0 {
+		seed += publication.Attempt.StartedAt.String()
+	}
 	return action.Body + fmt.Sprintf("\n\n<!-- reviewctl:discussion:%x:%s -->", sha256.Sum256([]byte(seed)), action.ThreadID)
 }
 
@@ -45,7 +48,7 @@ func inspectPublicationDiscussion(publication Publication, action DiscussionActi
 }
 
 func (publication Publication) receivedDiscussionFeedback(before, current githubReviewThread) bool {
-	if !publication.RecoverAcrossHeads {
+	if publication.Attempt.RoundID == 0 {
 		return false
 	}
 	original := make(map[int64]githubReviewComment, len(before.Comments))

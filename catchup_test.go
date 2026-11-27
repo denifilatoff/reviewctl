@@ -13,14 +13,16 @@ import (
 func catchUpPublication(pr PullRequest, threads []githubReviewThread) Publication {
 	const head = "0123456789abcdef0123456789abcdef01234567"
 	const digest = "sha256:test"
+	attempt := Attempt{PullRequest: pr, RoundID: 1, RoundKey: "fixture-catch-up", Pass: 1,
+		HeadSHA: head, SkillDigest: digest, StartedAt: time.Now().UTC()}
 	return Publication{
-		Attempt: Attempt{PullRequest: pr, HeadSHA: head, SkillDigest: digest, StartedAt: time.Now().UTC()},
+		Attempt: attempt,
 		Draft: ReviewDraft{
 			Provider: pr.Provider, Repository: pr.Repository, Number: pr.Number, HeadSHA: head,
-			SkillDigest: digest, Verdict: "APPROVE", Body: "Review complete.\n\n" + reviewMarker(pr, head, digest),
+			SkillDigest: digest, Verdict: "APPROVE", Body: "Review complete.\n\n" + attempt.publicationMarker(),
 			Comments: []ReviewComment{}, Discussions: []DiscussionAction{},
 		},
-		Login: "reviewer", Threads: threads, RecoverAcrossHeads: true,
+		Login: "reviewer", Threads: threads,
 	}
 }
 

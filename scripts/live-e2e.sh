@@ -62,9 +62,9 @@ export XDG_CONFIG_HOME="$work/config"
 export XDG_STATE_HOME="$work/state"
 
 count_markers() {
-  marker="<!-- reviewctl:github:denifilatoff/reviewctl#24:$head:$1 -->"
+  marker="<!-- reviewctl:github:denifilatoff/reviewctl#24:round:$1 -->"
   marker_ids=$(gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
-    --jq ".[] | select(.body != null and (.body | contains(\"$marker\"))) | .id") || return 1
+    --jq ".[] | select(.commit_id == \"$head\" and .body != null and (.body | contains(\"$marker\"))) | .id") || return 1
   printf '%s\n' "$marker_ids" | awk 'NF { count++ } END { print count + 0 }'
 }
 
@@ -117,35 +117,44 @@ case $skill_digest in
 sha256:*) ;;
 *) echo "doctor did not report the locked skill digest" >&2; exit 1 ;;
 esac
-initial_count=$(count_markers "$skill_digest")
-if [ "$initial_count" -gt 1 ]; then
+known_markers=$(gh api repos/denifilatoff/reviewctl/pulls/24/reviews --paginate \
+  --jq '.[] | (.body // "") | scan("<!-- reviewctl:github:denifilatoff/reviewctl#24:[^ >]+ -->")')
+if [ -n "$(printf '%s\n' "$known_markers" | sort | uniq -d)" ]; then
   echo "unsafe live fixture: duplicate reviewctl markers" >&2
   exit 1
 fi
 
 write_config true
 "$binary" --json run >"$work/run-1.json"
-first_count=$(count_markers "$skill_digest")
-if [ "$first_count" -ne 1 ] || ! grep -q '"verdict":"COMMENT"' "$work/run-1.json"; then
-  echo "first successful run did not read back exactly one COMMENT review" >&2
+db="$work/state/reviewctl/reviewctl.db"
+set -- "$work/state/reviewctl/reviews/github/denifilatoff/reviewctl/24/rounds/"*/passes/*/pass.json
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+  echo "first successful run did not save exactly one review pass" >&2
   exit 1
 fi
-if grep -q '"recovered":false' "$work/run-1.json"; then
-  mode=publication
-elif grep -q '"recovered":true' "$work/run-1.json"; then
-  mode=recovery
-else
-  echo "first successful run did not report publication or recovery" >&2
+pass_file=$(printf '%s\n' "$1" | sed "s/'/''/g")
+round_key=$(sqlite3 "$db" "SELECT json_extract(readfile('$pass_file'), '$.Attempt.round_key');")
+if ! printf '%s\n' "$round_key" | grep -Eq '^[A-Z2-7]+$'; then
+  echo "invalid round key in the saved review pass" >&2
   exit 1
 fi
+first_count=$(count_markers "$round_key")
+if [ "$first_count" -ne 1 ] || ! grep -q '"verdict":"COMMENT"' "$work/run-1.json" ||
+    ! grep -q '"recovered":false' "$work/run-1.json"; then
+  echo "first successful run did not publish and read back one COMMENT review" >&2
+  exit 1
+fi
+
 if [ "$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)" != "$head" ]; then
   echo "pull request head changed after the first run" >&2
   exit 1
 fi
 
+sqlite3 "$db" "INSERT INTO review_publications(provider, repository, change_number, payload)
+  VALUES ('github', 'denifilatoff/reviewctl', 24, CAST(readfile('$pass_file') AS TEXT));"
 "$binary" --json review "$pr_url" >"$work/enqueue-2.json"
 "$binary" --json run >"$work/run-2.json"
-second_count=$(count_markers "$skill_digest")
+second_count=$(count_markers "$round_key")
 if [ "$second_count" -ne 1 ] || ! grep -q '"recovered":true' "$work/run-2.json" ||
     ! grep -q '"verdict":"COMMENT"' "$work/run-2.json"; then
   echo "second run did not recover the existing marker without a duplicate" >&2
@@ -165,5 +174,5 @@ if [ "$history_count" -ne 3 ] || [ "$success_count" -ne 2 ] || [ "$failure_count
   echo "unexpected state after live E2E: history=$history_count success=$success_count failure=$failure_count queue=$queue_count" >&2
   exit 1
 fi
-printf 'live E2E passed: mode=%s head=%s marked_reviews=%s history=%s\n' \
-  "$mode" "$head" "$second_count" "$history_count"
+printf 'live E2E passed: head=%s marked_reviews=%s history=%s\n' \
+  "$head" "$second_count" "$history_count"
