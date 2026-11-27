@@ -16,18 +16,21 @@ type Store struct{ db *sql.DB }
 
 type Attempt struct {
 	PullRequest
-	Cost         *ReviewCost `json:"cost,omitempty"`
-	HeadSHA      string      `json:"head_sha,omitempty"`
-	SkillDigest  string      `json:"skill_digest,omitempty"`
-	StartedAt    time.Time   `json:"started_at"`
-	FinishedAt   time.Time   `json:"finished_at"`
-	Success      bool        `json:"success"`
-	Verdict      string      `json:"verdict,omitempty"`
-	ReviewID     string      `json:"review_id,omitempty"`
-	ReviewURL    string      `json:"review_url,omitempty"`
-	Recovered    bool        `json:"recovered,omitempty"`
-	ErrorCode    string      `json:"error_code,omitempty"`
-	ErrorMessage string      `json:"error_message,omitempty"`
+	RoundID            int64               `json:"round_id,omitempty"`
+	Pass               int                 `json:"pass,omitempty"`
+	Cost               *ReviewCost         `json:"cost,omitempty"`
+	HeadSHA            string              `json:"head_sha,omitempty"`
+	SkillDigest        string              `json:"skill_digest,omitempty"`
+	StartedAt          time.Time           `json:"started_at"`
+	FinishedAt         time.Time           `json:"finished_at"`
+	Success            bool                `json:"success"`
+	Verdict            string              `json:"verdict,omitempty"`
+	ReviewID           string              `json:"review_id,omitempty"`
+	ReviewURL          string              `json:"review_url,omitempty"`
+	Recovered          bool                `json:"recovered,omitempty"`
+	DiscussionOutcomes []DiscussionOutcome `json:"discussion_outcomes,omitempty"`
+	ErrorCode          string              `json:"error_code,omitempty"`
+	ErrorMessage       string              `json:"error_message,omitempty"`
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -87,6 +90,8 @@ func OpenStore(path string) (*Store, error) {
 			payload TEXT NOT NULL,
 			PRIMARY KEY(provider, repository, change_number)
 		)`,
+		findingRegistryTable,
+		findingPassesTable,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,

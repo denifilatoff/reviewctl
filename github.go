@@ -44,18 +44,23 @@ type githubReviewComment struct {
 	Author     string
 	ReplyToID  int64
 	Body       string
+	ReviewBody string
 }
 
 type githubReviewThread struct {
 	ID         string
 	IsResolved bool
+	ResolvedBy string
 	Comments   []githubReviewComment
 }
 
 type githubReviewThreadWire struct {
 	ID         string `json:"id"`
 	IsResolved bool   `json:"isResolved"`
-	Comments   struct {
+	ResolvedBy struct {
+		Login string `json:"login"`
+	} `json:"resolvedBy"`
+	Comments struct {
 		Nodes []struct {
 			DatabaseID int64  `json:"databaseId"`
 			Body       string `json:"body"`
@@ -65,6 +70,9 @@ type githubReviewThreadWire struct {
 			ReplyTo *struct {
 				DatabaseID int64 `json:"databaseId"`
 			} `json:"replyTo"`
+			PullRequestReview struct {
+				Body string `json:"body"`
+			} `json:"pullRequestReview"`
 		} `json:"nodes"`
 		PageInfo struct {
 			HasNextPage bool `json:"hasNextPage"`
@@ -72,7 +80,7 @@ type githubReviewThreadWire struct {
 	} `json:"comments"`
 }
 
-const reviewThreadFields = `id isResolved comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage}}`
+const reviewThreadFields = `id isResolved resolvedBy{login} comments(first:100){nodes{databaseId author{login} replyTo{databaseId} body pullRequestReview{body}} pageInfo{hasNextPage}}`
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{` + reviewThreadFields + `} pageInfo{hasNextPage}}}}}`
 const reviewThreadQuery = `query($id:ID!){node(id:$id){... on PullRequestReviewThread{` + reviewThreadFields + `}}}`
 
@@ -150,7 +158,7 @@ func decodeGitHubReviewThread(item githubReviewThreadWire) (githubReviewThread, 
 	if item.ID == "" || item.Comments.PageInfo.HasNextPage || len(item.Comments.Nodes) == 0 {
 		return githubReviewThread{}, fmt.Errorf("GitHub returned an incomplete review thread")
 	}
-	thread := githubReviewThread{ID: item.ID, IsResolved: item.IsResolved}
+	thread := githubReviewThread{ID: item.ID, IsResolved: item.IsResolved, ResolvedBy: item.ResolvedBy.Login}
 	for _, comment := range item.Comments.Nodes {
 		replyTo := int64(0)
 		if comment.ReplyTo != nil {
@@ -158,6 +166,7 @@ func decodeGitHubReviewThread(item githubReviewThreadWire) (githubReviewThread, 
 		}
 		thread.Comments = append(thread.Comments, githubReviewComment{
 			DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
+			ReviewBody: comment.PullRequestReview.Body,
 		})
 	}
 	return thread, nil
@@ -258,7 +267,8 @@ func commentsPreserved(before, after []githubReviewComment) bool {
 	}
 	for _, comment := range before {
 		preserved, found := current[comment.DatabaseID]
-		if !found || preserved != comment {
+		if !found || preserved.Author != comment.Author || preserved.ReplyToID != comment.ReplyToID ||
+			preserved.Body != comment.Body {
 			return false
 		}
 	}
