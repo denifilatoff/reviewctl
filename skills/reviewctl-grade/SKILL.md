@@ -8,8 +8,15 @@ preserve the skill's two waves and measurement step, and ask a fresh subagent to
 Sol with high reasoning effort for the coordinator and all subagents. The full grade applies regardless of diff
 size. Follow repository guidance for inspecting and testing code within the controller's scope.
 
-Put the skill's working directory under the controller's attempt workspace. Review only the pinned head.
-If the head changes, report a coverage gap so ReviewCTL can start a new attempt.
+Put the skill's working directory under the controller's attempt workspace. Review the controller's pinned checkout.
+Use that head in `review.json` and in the axis and verifier briefs. Before handing over, check that the checkout
+still matches the pinned head. The controller handles remote head changes, so complete the pass on the pinned
+checkout even when GitHub reports a newer head. Derive changed paths and source evidence from the pinned commits.
+Report a coverage gap if pinned evidence required for the review is unavailable.
+
+For a catch-up pass, use the two commits supplied by the controller as the transition scope and reassess the saved
+findings at the pinned head. Include affected code outside the transition diff. Use the full pinned PR diff when
+the transition or earlier evidence leaves a coverage gap. Use the pinned PR diff for GitHub inline locations.
 
 Use the installed `review-delivery` schema to write `review.json`, then convert that result to the JSON draft in
 the controller's instruction. ReviewCTL handles delivery.
