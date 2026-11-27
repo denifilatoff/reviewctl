@@ -95,9 +95,8 @@ accepted it.
 
 ReviewCTL links existing open findings to their original discussions. It closes an owned discussion after a verified
 fix and records the fix's verification SHA. If a finding regresses, ReviewCTL can reopen a discussion that it closed.
-Human closures, closures with unknown provenance, and accepted risks stay in effect. If a closed discussion conflicts
-with the review's evidence, the short result links to the discussion. A later result repeats the discrepancy only
-when there is new evidence.
+A manual resolution declines the finding, with or without a reply. Later rounds skip it. ReviewCTL also
+respects resolved threads whose closure origin is unknown. The registry retains earlier evidence and IDs.
 
 `draft_rejected` means GitHub returned a request validation error and readback confirmed that the review or discussion
 reply was not created. ReviewCTL retires that plan and supplies the validation error to the next Codex attempt for

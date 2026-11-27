@@ -157,6 +157,10 @@ func observeFindingThread(pr PullRequest, thread githubReviewThread) findingThre
 		Resolved: thread.IsResolved, ResolvedBy: normalizeGitHubLogin(thread.ResolvedBy)}
 }
 
+func (f findingRecord) declined() bool {
+	return f.Thread != nil && f.Thread.Resolved && !f.Thread.ClosedByController
+}
+
 func (f *findingRecord) observeThread(attempt Attempt, state findingThread) {
 	if f.Thread != nil && f.Thread.Resolved && state.Resolved && f.Thread.ResolvedBy == state.ResolvedBy {
 		state.ClosedByController = f.Thread.ClosedByController || state.ClosedByController
@@ -229,14 +233,16 @@ func (input FindingPass) instruction(inputPath string) (string, error) {
 	return fmt.Sprintf(`
 Finding registry snapshot: %s
 Read the finding registry snapshot. Use its text and linked GitHub discussions as evidence.
-Use the review scope specified for this pass. Assess every open or regressed finding in the registry. Revisit fixed
-or previously closed findings when the code or replies provide evidence of regression. Respect documented accepted risks.
+A resolved thread without closed_by_controller means the human declined the finding. This includes legacy_closed.
+Use these records only to recognize duplicates. Omit declined findings from review.json, finding_assessments,
+the verdict, summary, comments, and actions, even when the closure has no comment. Never refile the same defect.
+Assess all remaining open or regressed findings. Revisit controller-verified fixes on evidence of regression.
+Respect documented accepted risks.
 Use the locked skill's review.json format. Finding IDs in that file are pass-local until the controller reconciles them.
 In the final controller draft, leave discussions empty. Keep body to one short summary without restating finding text.
 Include finding_assessments as an array, even when empty. Each assessment has status and a concrete reason.
-For an existing finding, include known_id from the registry. For a confirmed regression of a closed legacy finding,
-include legacy_thread_id from the snapshot. For a new finding, include report_id from review.json, without known_id
-or legacy_thread_id. When review.json includes an updated record for a known or legacy finding, also include report_id.
+For an existing finding, include known_id from the registry. For a new finding, include report_id from review.json.
+When review.json includes an updated record for a known finding, also include report_id.
 Map every review.json finding to exactly one assessment. Use these statuses: open, fixed, regressed, accepted_risk,
 withdrawn, unable_to_verify. Use fixed only after verification. Use regressed for a verified return of a fixed or
 closed defect. Use accepted_risk only when the discussion documents explicit risk acceptance.

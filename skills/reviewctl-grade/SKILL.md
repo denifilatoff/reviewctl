@@ -29,3 +29,5 @@ ReviewCTL handles delivery.
   with an inline location in the pinned PR diff, map `new` to `RIGHT` and `old` to `LEFT`.
 - Use the controller's finding registry and assessment contract to report what happened to prior findings. Include
   the evidence for each status. ReviewCTL assigns stable IDs and decides which discussion actions to take.
+- A manually resolved discussion marks a declined finding, even without a comment. Exclude it from assessments,
+  new findings, and the review result. Consult the registry for closure provenance before reporting a regression.

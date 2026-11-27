@@ -32,14 +32,11 @@ func applyFindingAssessments(attempt Attempt, input FindingPass, registry *findi
 			if entry == nil || input.Registry.byID(assessment.KnownID) == nil || assessment.LegacyThreadID != "" {
 				return draft, nil, fmt.Errorf("finding assessment refers to unknown finding %q", assessment.KnownID)
 			}
-		case assessment.LegacyThreadID != "":
-			state, listed := input.LegacyClosed[assessment.LegacyThreadID]
-			if !listed || registry.byThread(state.ID) != nil || !hasReport || assessment.Status != findingRegression {
-				return draft, nil, fmt.Errorf("closed legacy discussion %q requires confirmed regression and a report finding", assessment.LegacyThreadID)
+			if entry.declined() {
+				return draft, nil, fmt.Errorf("omit declined finding %s from the review", entry.ID)
 			}
-			entry = registry.add(key.title, nil)
-			entry.Announced = true
-			entry.observeThread(attempt, state)
+		case assessment.LegacyThreadID != "":
+			return draft, nil, fmt.Errorf("omit closed legacy thread %s from the review", assessment.LegacyThreadID)
 		default:
 			if !hasReport || assessment.Status != findingOpen {
 				return draft, nil, fmt.Errorf("new finding assessment requires a review.json finding and open status")
@@ -73,7 +70,7 @@ func applyFindingAssessments(attempt Attempt, input FindingPass, registry *findi
 		}
 	}
 	for _, entry := range registry.Findings[:knownBefore] {
-		if (entry.Status == findingOpen || entry.Status == findingRegression) && !assessed[entry.ID] {
+		if (entry.Status == findingOpen || entry.Status == findingRegression) && !entry.declined() && !assessed[entry.ID] {
 			return draft, nil, fmt.Errorf("review draft is missing an assessment for open finding %s", entry.ID)
 		}
 	}
@@ -161,15 +158,6 @@ func (draft *ReviewDraft) prepareFindingPublication(input FindingPass, registry 
 			action.Action = "open_with_reply"
 			action.ExpectedResolver = f.Thread.ResolvedBy
 			action.Body = fmt.Sprintf("%s reproduced at `%s`. %s", f.ID, f.VerifiedSHA, f.Reason)
-		case (f.Status == findingOpen || f.Status == findingRegression) && thread.IsResolved && f.VerifiedSHA != "":
-			key := f.EvidenceKey
-			if key == "" {
-				key = "closed_with_open_finding"
-			}
-			if !slices.Contains(f.ReportedDiscrepancies, key) {
-				metadata.Discrepancies[f.ID] = key
-				notes = append(notes, fmt.Sprintf("- [%s](%s) still applies. %s", f.ID, f.Thread.URL, f.Reason))
-			}
 		case f.Status == findingRegression && !thread.IsResolved:
 			key := "regressed:" + f.EvidenceKey
 			if !slices.Contains(f.ReportedDiscrepancies, key) {

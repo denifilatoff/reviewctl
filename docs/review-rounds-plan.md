@@ -35,13 +35,13 @@ Test same-SHA rounds, restart and retry, commands and pushes in one poll, and ma
 
 Use the locked skill schema for the finding ID format. ReviewCTL allocates stable numbers per PR before the next pass
 or publication. The agent identifies known defects and explains changes. Test compatibility on skill upgrades.
-For existing PRs, assign IDs to open findings with links to their original threads. Import closed ones on regression.
+For existing PRs, assign IDs to open findings with links to their original threads.
 Track finding status, verification SHA, GitHub thread identity and state, and who closed the thread where known.
 Each new round reviews the full PR diff and all open findings. Revisit fixed findings when evidence suggests regression.
 
 Close an owned thread when a fix was verified, recording the actual SHA even if the head moved.
 On confirmed regression, reopen a controller-closed thread with evidence. Respect human closures and accepted risks.
-Mention a material discrepancy once in the short result and repeat only when new evidence warrants it.
+Treat a manually resolved finding as declined. Omit it from later assessments, review summaries, and verdicts.
 Keep full history in the registry. Publish changes requiring attention and avoid duplicating thread bodies.
 Test stable numbering across passes, retries, migration, and both closure origins.
 
