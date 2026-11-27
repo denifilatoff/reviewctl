@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type codedError struct {
@@ -40,6 +41,8 @@ type GitHubPullRequest struct {
 }
 
 type githubReviewComment struct {
+	CreatedAt  time.Time
+	ReviewBody string
 	DatabaseID int64
 	Author     string
 	ReplyToID  int64
@@ -59,6 +62,10 @@ type githubReviewThreadWire struct {
 }
 
 type githubReviewCommentWire struct {
+	CreatedAt         time.Time `json:"createdAt"`
+	PullRequestReview struct {
+		Body string `json:"body"`
+	} `json:"pullRequestReview"`
 	DatabaseID int64  `json:"databaseId"`
 	Body       string `json:"body"`
 	Author     struct {
@@ -96,7 +103,7 @@ func (page githubPage[T]) nextCursor(seen map[string]bool) (string, error) {
 	return info.EndCursor, nil
 }
 
-const reviewCommentFields = `nodes{databaseId author{login} replyTo{databaseId} body} pageInfo{hasNextPage endCursor}`
+const reviewCommentFields = `nodes{databaseId author{login} replyTo{databaseId} body createdAt pullRequestReview{body}} pageInfo{hasNextPage endCursor}`
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String){
 	repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){
 		nodes{id isResolved comments(first:100){` + reviewCommentFields + `}} pageInfo{hasNextPage endCursor}
@@ -235,6 +242,7 @@ func completeGitHubReviewThread(ctx context.Context, item githubReviewThreadWire
 			}
 			thread.Comments = append(thread.Comments, githubReviewComment{
 				DatabaseID: comment.DatabaseID, Author: comment.Author.Login, ReplyToID: replyTo, Body: comment.Body,
+				CreatedAt: comment.CreatedAt, ReviewBody: comment.PullRequestReview.Body,
 			})
 			seenComments[comment.DatabaseID] = true
 		}
@@ -325,7 +333,8 @@ func commentsPreserved(before, after []githubReviewComment) bool {
 	}
 	for _, comment := range before {
 		preserved, found := current[comment.DatabaseID]
-		if !found || preserved != comment {
+		if !found || preserved.Author != comment.Author || preserved.ReplyToID != comment.ReplyToID ||
+			preserved.Body != comment.Body {
 			return false
 		}
 	}

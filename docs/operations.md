@@ -87,21 +87,23 @@ calculator version, calculation time, the report, and any accounting error. `doc
 
 ## Review publication and retries
 
-Codex prepares the summary, inline findings, and actions for existing owned discussions. ReviewCTL validates that draft
-for the pinned commit and saves it with its accounting before publishing. A `publication_failed` result retains the
-prepared publication. The next `run` resumes delivery using the original draft and usage.
+Codex prepares a short summary, inline findings, and actions for existing owned discussions. ReviewCTL saves the
+verified report and its evidence before publishing. Each round has its own publication marker, so a new round on the
+same commit can publish a new result. After `publication_failed`, the next `run` resumes the saved round and recovers
+the existing review when GitHub already accepted it.
 
 `draft_rejected` means GitHub returned a request validation error and readback confirmed that the review or discussion
 reply was not created. ReviewCTL retires that plan and supplies the validation error to the next Codex attempt for
-correction. An already-published review is preserved when its proposed discussion reply is rejected.
+correction. If the review was already published when GitHub rejected a discussion reply, ReviewCTL keeps that review
+and queues a fresh round.
 Setup failures leave this diagnostic available until the next Codex invocation. Later analyses do not receive it.
 If readback is unavailable, or the matching reply already exists, the plan remains saved for marker recovery.
 
 `review_dismissed` reports that GitHub dismissed the marked review for the current head. Inspect its dismissal reason
 on GitHub. A newer PR head is assessed independently.
 
-`review_conflict` means a reassessment produced new findings or a different verdict for a head that already has a
-published review. The new draft and accounting remain saved; ReviewCTL keeps the PR queued and reports the existing
+A publication saved by an older ReviewCTL version can still report `review_conflict` if its reassessment found new
+findings or a different verdict for a head that already had a published review. The new draft and accounting remain saved; ReviewCTL keeps the PR queued and reports the existing
 review URL. Repeated runs retain the conflict without invoking Codex or recording its original usage again.
 
 Inspect the existing review and export the retained draft for manual assessment. For example, with SQLite's CLI:
@@ -175,10 +177,30 @@ reviewctl bulk-review https://github.com/<owner>/<repository>/pull/<number> \
 Duplicate pull requests report `already_queued` and remain safe no-ops. An invalid pull request URL returns exit code
 `2`.
 
+## Control reviews from GitHub
+
+Post a command as a pull request comment or in a review discussion. ReviewCTL accepts commands from the same trusted
+GitHub accounts it accepts as PR authors. It processes new comments once, on its next poll or at a review pass boundary.
+
+- `/reviewctl pause` saves the active pass when it finishes and holds publication and later passes.
+- `/reviewctl resume` enables automation and processes queued work once, using the latest head. A saved publication is
+  checked against the current PR and discussions before delivery. With an empty queue, automation resumes without a review.
+- `/reviewctl review` requests one round, including on an already reviewed commit. During a pause, it allows one round
+  to finish and publish while leaving the PR paused afterward. Pending duplicate requests share that round.
+
+A new text reply from the PR author in an open ReviewCTL thread requests a round, even if the head stays the same.
+The controller groups pending replies and pushes into one review. On the first poll after setup or upgrade, it records
+the starting point for commands and replies. GitHub reactions have no effect.
+
 ## Inspect state
 
 `status` prints the pending queue, recent review history, and whether a `run` process holds the lock. It returns the
 20 most recent history entries unless you set a limit.
+
+The state directory also holds the PR history at `reviews/github/<owner>/<repo>/<number>/rounds/`. Each pass directory
+contains the reviewed SHA and prepared draft in `pass.json`, the skill report in `review.json`, any referenced evidence
+under `evidence/`, and publication outcomes under `outcomes/` once delivery is attempted. A later pass receives the
+previous report path and the PR history directory.
 
 ```shell
 reviewctl status

@@ -12,10 +12,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *sql.DB
+	path string
+}
 
 type Attempt struct {
 	PullRequest
+	RoundID      int64       `json:"round_id,omitempty"`
+	RoundKey     string      `json:"round_key,omitempty"`
+	Pass         int         `json:"pass,omitempty"`
+	Held         bool        `json:"held,omitempty"`
 	Cost         *ReviewCost `json:"cost,omitempty"`
 	HeadSHA      string      `json:"head_sha,omitempty"`
 	SkillDigest  string      `json:"skill_digest,omitempty"`
@@ -87,6 +94,28 @@ func OpenStore(path string) (*Store, error) {
 			payload TEXT NOT NULL,
 			PRIMARY KEY(provider, repository, change_number)
 		)`,
+		`CREATE TABLE IF NOT EXISTS review_controls (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			change_number INTEGER NOT NULL,
+			payload TEXT NOT NULL,
+			PRIMARY KEY(provider, repository, change_number)
+		)`,
+		`CREATE TABLE IF NOT EXISTS review_input_cursors (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			baseline DATETIME NOT NULL,
+			latest DATETIME NOT NULL,
+			PRIMARY KEY(provider, repository)
+		)`,
+		`CREATE TABLE IF NOT EXISTS review_inputs (
+			provider TEXT NOT NULL,
+			repository TEXT NOT NULL,
+			change_number INTEGER NOT NULL,
+			source TEXT NOT NULL,
+			comment_id INTEGER NOT NULL,
+			PRIMARY KEY(provider, repository, change_number, source, comment_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS pull_request_baselines (
 			provider TEXT NOT NULL,
 			repository TEXT NOT NULL,
@@ -127,7 +156,21 @@ func OpenStore(path string) (*Store, error) {
 			}
 		}
 	}
-	return &Store{db: db}, nil
+	for _, column := range []string{"round_id", "pass_number"} {
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = ?`, column).Scan(&exists); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("inspect round history schema: %w", err)
+		}
+		if exists == 0 {
+			if _, err := db.Exec(`ALTER TABLE history ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`); err != nil {
+				if checkErr := db.QueryRow(`SELECT count(*) FROM pragma_table_info('history') WHERE name = ?`, column).Scan(&exists); checkErr != nil || exists == 0 {
+					db.Close()
+					return nil, fmt.Errorf("migrate round history: %w", err)
+				}
+			}
+		}
+	}
+	return &Store{db: db, path: path}, nil
 }
 
 func (s *Store) ApplyDiscoverySnapshot(
@@ -285,7 +328,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 	}
 	rows, err = tx.QueryContext(ctx, `
 		SELECT provider, repository, change_number, url, head_sha, skill_digest, started_at, finished_at,
-			success, verdict, review_id, review_url, error_code, error_message, cost_json FROM history ORDER BY id DESC LIMIT ?`,
+			success, verdict, review_id, review_url, error_code, error_message, cost_json, round_id, pass_number FROM history ORDER BY id DESC LIMIT ?`,
 		historyLimit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read history: %w", err)
@@ -296,7 +339,7 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 		var started, finished, cost string
 		if err := rows.Scan(&attempt.Provider, &attempt.Repository, &attempt.Number, &attempt.URL, &attempt.HeadSHA,
 			&attempt.SkillDigest, &started, &finished, &attempt.Success, &attempt.Verdict, &attempt.ReviewID,
-			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage, &cost); err != nil {
+			&attempt.ReviewURL, &attempt.ErrorCode, &attempt.ErrorMessage, &cost, &attempt.RoundID, &attempt.Pass); err != nil {
 			rows.Close()
 			return nil, nil, fmt.Errorf("read history entry: %w", err)
 		}
@@ -324,6 +367,12 @@ func (s *Store) Status(ctx context.Context, historyLimit int) ([]PullRequest, []
 }
 
 func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
+	if attempt.Held {
+		return nil
+	}
+	if err := s.savePassOutcome(attempt); err != nil {
+		return fmt.Errorf("save pass outcome: %w", err)
+	}
 	cost, err := encodeCost(attempt.Cost)
 	if err != nil {
 		return fmt.Errorf("encode accounting: %w", err)
@@ -335,12 +384,12 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO history(provider, repository, change_number, url, head_sha, skill_digest,
-			started_at, finished_at, success, verdict, review_id, review_url, error_code, error_message, cost_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			started_at, finished_at, success, verdict, review_id, review_url, error_code, error_message, cost_json, round_id, pass_number)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		attempt.Provider, attempt.Repository, attempt.Number, attempt.URL, attempt.HeadSHA, attempt.SkillDigest,
 		attempt.StartedAt.UTC().Format(time.RFC3339Nano), attempt.FinishedAt.UTC().Format(time.RFC3339Nano),
 		attempt.Success, attempt.Verdict, attempt.ReviewID, attempt.ReviewURL, attempt.ErrorCode,
-		bounded(attempt.ErrorMessage, 512), cost); err != nil {
+		bounded(attempt.ErrorMessage, 512), cost, attempt.RoundID, attempt.Pass); err != nil {
 		return fmt.Errorf("record attempt: %w", err)
 	}
 	removeFromQueue := attempt.Success
@@ -365,12 +414,35 @@ func (s *Store) Finish(ctx context.Context, attempt Attempt) error {
 			}
 		}
 	}
-	if removeFromQueue || attempt.ErrorCode == "head_changed" || attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected" {
+	retirePass := (attempt.ErrorCode == "head_changed" || attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected") &&
+		(attempt.RoundID == 0 || attempt.ReviewID == "")
+	roundNeedsReassessment := attempt.RoundID != 0 && attempt.ReviewID != "" &&
+		(attempt.ErrorCode == "discussion_changed" || attempt.ErrorCode == "draft_rejected")
+	if removeFromQueue || retirePass || roundNeedsReassessment {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM review_publications
 			WHERE provider = ? AND repository = ? AND change_number = ?`, attempt.Provider, attempt.Repository, attempt.Number); err != nil {
 			return fmt.Errorf("complete prepared publication: %w", err)
 		}
 	}
+	state, known, err := readReviewControl(ctx, tx, attempt.PullRequest)
+	if err != nil {
+		return fmt.Errorf("read round state: %w", err)
+	}
+	if known && state.RoundID == attempt.RoundID {
+		switch {
+		case removeFromQueue || roundNeedsReassessment:
+			state.RoundID, state.RoundKey, state.RetiredPass, state.PermitPaused = 0, "", 0, false
+		case retirePass:
+			state.RetiredPass = max(state.RetiredPass, attempt.Pass)
+		}
+		if err := saveReviewControl(ctx, tx, attempt.PullRequest, state); err != nil {
+			return fmt.Errorf("record round state: %w", err)
+		}
+	}
+	if attempt.Success && (state.Manual || state.Requested) {
+		removeFromQueue = false
+	}
+
 	if removeFromQueue {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM queue WHERE provider = ? AND repository = ? AND change_number = ?`,
 			attempt.Provider, attempt.Repository, attempt.Number); err != nil {

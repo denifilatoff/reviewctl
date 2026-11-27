@@ -296,9 +296,9 @@ func TestControllerKeepsAccountingAfterCrashBeforeHistory(t *testing.T) {
 	if err := store.Finish(ctx, second); err != nil {
 		t.Fatal(err)
 	}
-	third := ProcessAttempt(ctx, cfg, store, pr)
-	if !third.Success || !third.Recovered || third.Cost != nil {
-		t.Fatalf("marker recovery duplicated accounting = %+v", third)
+	_, history, err := store.Status(ctx, 5)
+	if err != nil || len(history) != 1 || history[0].Cost == nil || history[0].ReviewID != first.ReviewID {
+		t.Fatalf("history after marker recovery = %+v, %v; want one original charge", history, err)
 	}
 }
 

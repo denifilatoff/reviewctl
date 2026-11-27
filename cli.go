@@ -461,6 +461,13 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 		}
 	}
 	for _, pr := range queue {
+		allowed, stateErr := store.reviewAllowed(runContext, pr)
+		if stateErr != nil {
+			return writeFailure(stdout, stderr, jsonMode, "run", 1, "state_failed", stateErr.Error())
+		}
+		if !allowed {
+			continue
+		}
 		attemptContext, cancel := context.WithTimeout(runContext, cfg.AttemptTimeout)
 		attempt := ProcessAttempt(attemptContext, cfg, store, pr)
 		attemptContextError := attemptContext.Err()
@@ -480,7 +487,9 @@ func runCommandOnce(stdout, stderr io.Writer, jsonMode bool) int {
 			attempt.ErrorMessage = bounded(err.Error(), 512)
 		}
 		item := runItem{PullRequest: pr, Status: "failed", Cost: attempt.Cost}
-		if attempt.Success {
+		if attempt.Held {
+			item.Status = "paused"
+		} else if attempt.Success {
 			item.Status, item.Verdict, item.ReviewURL, item.Recovered = "success", attempt.Verdict, attempt.ReviewURL, attempt.Recovered
 			result.Succeeded++
 		} else {
@@ -529,6 +538,10 @@ func writeHumanRunResult(stdout io.Writer, result runResult) {
 	}
 	for _, item := range result.Results {
 		identity := fmt.Sprintf("%s:%s#%d", item.Provider, item.Repository, item.Number)
+		if item.Status == "paused" {
+			fmt.Fprintf(stdout, "attempt: pull_request=%s url=%s status=paused\n", identity, item.URL)
+			continue
+		}
 		if item.Status == "success" {
 			fmt.Fprintf(stdout,
 				"attempt: pull_request=%s url=%s status=success verdict=%s review_url=%s recovered=%t\n",
@@ -573,12 +586,18 @@ func discoverRepositories(ctx context.Context, cfg Config, store *Store) []disco
 					eligible = append(eligible, pullRequest)
 				}
 			}
-			item.Enqueued, fetched.err = store.ApplyDiscoverySnapshot(ctx, fetched.repository, eligible)
+			if cfg.Publish {
+				item.Enqueued, fetched.err = store.pollRepositoryReviewInputs(ctx, cfg, fetched.repository, eligible)
+			}
+			added, snapshotErr := store.ApplyDiscoverySnapshot(ctx, fetched.repository, eligible)
+			item.Enqueued += added
+			fetched.err = errors.Join(fetched.err, snapshotErr)
 		}
 		if fetched.err != nil {
 			item.Status = "failed"
 			code := "state_failed"
-			if coded, ok := fetched.err.(*codedError); ok {
+			var coded *codedError
+			if errors.As(fetched.err, &coded) {
 				code = coded.code
 			}
 			item.Error = &resultError{Code: code, Message: bounded(fetched.err.Error(), 512)}
